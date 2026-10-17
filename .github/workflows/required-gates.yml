@@ -71,7 +71,9 @@ jobs:
           # Deployed environments keep TLS verify-full and secrets under env/<slug>/.
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 5432
+          # Loopback only, on a random host port: another job on the shared fbx-ci Docker host cannot
+          # reach this trust-auth database. The port is read in the step that sets TEST_DB_URL.
+          - "127.0.0.1::5432"
         options: >-
           --health-cmd "pg_isready -U accounts_test -d db_acc_accounts_ledger_test"
           --health-interval 5s

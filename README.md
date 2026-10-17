@@ -30,8 +30,8 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-acc-accounts-ledger**
 
 | What | Command / path |
 |---|---|
-| Full gate (unit, integration, ArchUnit, Money rule, coverage) | `./gradlew check` (integration tests need `TEST_DB_URL`, `TEST_DB_USERNAME`, `TEST_DB_PASSWORD` or Docker; with `CI=true` they fail without them) |
-| Integration tests against a local PostgreSQL 16 | set `TEST_DB_URL` (for example `jdbc:postgresql://localhost:5432/db_acc_accounts_ledger_test`), `TEST_DB_USERNAME` (`accounts_test`) and `TEST_DB_PASSWORD` (the owner role's password, from your own store), then `./gradlew :accounts-bootstrap:test`; the owner role needs `CREATEROLE` (the tests create the runtime role `accounts_runtime_it`) |
+| Full gate (unit, integration, ArchUnit, Money rule, coverage) | `./gradlew check` (integration tests need `TEST_DB_URL` and `TEST_DB_USERNAME` (plus `TEST_DB_PASSWORD` unless the database trusts local clients) or Docker; with `CI=true` they fail without them) |
+| Integration tests against a local PostgreSQL 16 | set `TEST_DB_URL` (for example `jdbc:postgresql://localhost:5432/db_acc_accounts_ledger_test`), `TEST_DB_USERNAME` (`accounts_test`) and, unless the database trusts local clients, `TEST_DB_PASSWORD` (the owner role's password, from your own store), then `./gradlew :accounts-bootstrap:test`; the owner role needs `CREATEROLE` (the tests create the runtime role `accounts_runtime_it`) |
 | Run locally without TLS | `SPRING_PROFILES_ACTIVE=local` (relaxes the startup TLS assertion for a local database and Kafka; never set in a deployment) |
 | Database migrations | `accounts-infrastructure/src/main/resources/db/migration` (V1 ledger tables, V2 outbox, V3 runtime-role grants: journal rows are insert-only) |
 | Kubernetes | `deploy/helm/accounts-ledger-service`; `templates/_fbx_helpers.tpl` is the cicd-templates `fbx.guard` copied byte for byte and checked by `scripts/ci/verify-vendored-guard.sh` |
@@ -76,7 +76,7 @@ consumed_events: []   # none, so the service owns no DLQ
 - [Service Data Ownership Matrix](https://github.com/COPUR/fintechbankx-governance-architecture-enablement-enterprise-architecture/blob/main/docs/enterprisearchitecture/implementation-development/SERVICE_DATA_OWNERSHIP_MATRIX.md)
 
 ## Güvenlik ve Uyumluluk Notları
-- Gerçek secret değerleri repo veya `.env` içinde tutulmaz; CI veritabanı parolası `CI_DB_PASSWORD` repo secret'ıdır.
+- Gerçek secret değerleri repo veya `.env` içinde tutulmaz; CI'daki geçici veritabanı `POSTGRES_HOST_AUTH_METHOD=trust` ile çalışır, parola secret'ı gerekmez.
 - CI pipeline, anonimlik, secret ve local-path sızıntısı kontrollerini bloklayıcı olarak çalıştırır.
 - Özel repo işleri `runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}` ile fbx-ci runner'ında koşar.
 

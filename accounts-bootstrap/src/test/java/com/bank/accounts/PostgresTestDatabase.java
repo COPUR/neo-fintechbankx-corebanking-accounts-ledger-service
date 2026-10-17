@@ -101,6 +101,7 @@ final class PostgresTestDatabase {
         if (external != null && !external.isBlank()) {
             url = external;
             ownerUser = env("TEST_DB_USERNAME", "accounts_test");
+            // Empty when the CI database trusts its clients (POSTGRES_HOST_AUTH_METHOD=trust).
             ownerPassword = env("TEST_DB_PASSWORD");
         } else {
             container = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -129,9 +130,6 @@ final class PostgresTestDatabase {
 
     private static String env(String name) {
         String value = System.getenv(name);
-        if (value == null || value.isBlank()) {
-            throw new IllegalStateException(name + " must be set when TEST_DB_URL points at an external database");
-        }
-        return value;
+        return value == null ? "" : value;
     }
 }

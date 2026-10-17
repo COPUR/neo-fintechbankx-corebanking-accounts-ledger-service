@@ -1,0 +1,7 @@
+{
+  "modules": {
+    "accounts-domain": 0.85,
+    "accounts-application": 0.85,
+    "accounts-infrastructure": 0.85
+  }
+}

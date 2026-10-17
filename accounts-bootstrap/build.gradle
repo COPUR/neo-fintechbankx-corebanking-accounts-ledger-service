@@ -1,0 +1,48 @@
+// =================================================================
+// ACCOUNTS LEDGER BOOTSTRAP MODULE
+// =================================================================
+// Runnable Spring Boot service (svc-acc-accounts-ledger). Wires the domain,
+// application and infrastructure modules; holds runtime configuration only.
+// =================================================================
+
+apply plugin: 'org.springframework.boot'
+
+description = 'Accounts Ledger Bootstrap - deployable svc-acc-accounts-ledger service'
+
+dependencies {
+    implementation project(':accounts-infrastructure')
+    implementation project(':accounts-application')
+    implementation project(':accounts-domain')
+    implementation project(':shared-kernel')
+
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+    implementation 'org.springframework.kafka:spring-kafka'
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+    runtimeOnly 'org.postgresql:postgresql'
+    // MSK IAM client auth, used by the kafka-msk profile (platform contract)
+    runtimeOnly 'software.amazon.msk:aws-msk-iam-auth:2.2.0'
+    runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.security:spring-security-test'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.4.1'
+}
+
+springBoot {
+    mainClass = 'com.bank.accounts.AccountsLedgerApplication'
+    buildInfo()
+}
+
+bootJar {
+    archiveFileName = 'accounts-ledger-service.jar'
+}
+
+jar {
+    enabled = false
+}

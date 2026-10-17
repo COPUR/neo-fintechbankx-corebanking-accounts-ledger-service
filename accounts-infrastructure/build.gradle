@@ -1,0 +1,71 @@
+apply plugin: 'jacoco'
+
+description = 'Accounts Infrastructure Layer - Persistence and external integrations'
+
+dependencies {
+    // Accounts layers
+    implementation project(':accounts-domain')
+    implementation project(':accounts-application')
+    
+    // Shared components
+    implementation project(':shared-kernel')
+
+    // Persistence: own schema sc_acc_accounts_ledger, Flyway migrations in src/main/resources/db/migration
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.postgresql:postgresql'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+
+    // Inbound HTTP
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+
+    // Messaging (outbox relay) and metrics
+    implementation 'org.springframework.kafka:spring-kafka'
+    implementation 'io.micrometer:micrometer-core'
+    
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Proves the outbox meters coexist under their Prometheus names (OutboxMetricsPrometheusTest).
+    testImplementation 'io.micrometer:micrometer-registry-prometheus'
+    testImplementation 'org.springframework.security:spring-security-test'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+}
+
+jacoco {
+    toolVersion = "0.8.14"
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = false
+    }
+}
+
+// Every class in the module counts, adapters and configuration included.
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.85
+            }
+        }
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+// The contract tests read api/openapi and api/asyncapi; a contract edit must re-run them.
+tasks.named('test') {
+    inputs.dir(rootProject.file('api')).withPropertyName('apiContracts').withPathSensitivity(PathSensitivity.RELATIVE)
+}

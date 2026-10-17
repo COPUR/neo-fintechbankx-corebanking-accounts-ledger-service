@@ -1,0 +1,450 @@
+# AsyncAPI contract for svc-acc-accounts-ledger (provider copy; source of truth).
+# Status: Proposed. Must match accounts-infrastructure AccountEventEnvelopeFactory (AccountEventContractTest).
+# Validate: npx -y @asyncapi/cli@2.13.0 validate api/asyncapi/svc-acc-accounts-ledger.yaml
+asyncapi: 3.0.0
+id: urn:fintechbankx:asyncapi:svc-acc-accounts-ledger
+info:
+  title: svc-acc-accounts-ledger events
+  version: 1.0.0
+  description: 'Event contract for svc-acc-accounts-ledger (repository neo-fintechbankx-corebanking-accounts-ledger-service).
+
+
+    Status: Proposed. Owner: Core Banking Accounts Squad, Core Banking Tribe. Event namespace: `evt.acc.account`. This file
+    in the provider repository is the source; the catalog copy (fintechbankx-governance-api-contracts-asyncapi-catalog)
+    follows in a catalog PR.
+
+
+    Implementation: accounts-infrastructure AccountEventEnvelopeFactory writes the envelope into the transactional outbox
+    (table outbox_event) in the same transaction as the account change; OutboxRelay publishes every event to the one aggregate
+    topic `evt.acc.account.v1` (ADR-019, one topic per aggregate) with key = aggregateId (the account id) and headers eventType,
+    eventId, correlationId, x-fapi-interaction-id (when present) and traceparent (when the request had one). Delivery is
+    at least once; consumers de-duplicate on eventId and order by aggregateVersion. Per ADR-021 decision 4 only a payload
+    error parks a row; a parked row holds back the later events of the same account until an operator replays it, so Debited
+    and Credited events of one account arrive in booking order. Events of other accounts continue.
+
+
+    One journal entry raises one Debited or Credited event per account it touches, each carrying the journalEntryId, so
+    a consumer can group the legs of one booking. A freeze reason is not published.
+
+
+    The service consumes no topics, so it owns no dead-letter topic. The topic is created by the platform (spring.kafka.admin.auto-create=false);
+    it uses cleanup.policy=delete.
+
+
+    Every message uses the standard envelope (common/event-envelope.yaml). Money is a decimal string plus an ISO 4217 code.
+    Adding an optional field or a new event type is a minor change; a removal, rename or type change is a new event major
+    (eventType ...v2) on the same topic.'
+  tags:
+  - name: core-banking
+  - name: evt.acc.account
+  x-service-id: svc-acc-accounts-ledger
+  x-event-namespace: evt.acc.account
+  x-owning-squad: Core Banking Accounts Squad
+defaultContentType: application/json
+servers:
+  msk:
+    host: '{bootstrapServers}'
+    protocol: kafka-secure
+    description: Amazon MSK cluster of the FinTechBankX event platform (svc-evt-streaming) on AWS. TLS in transit, SASL_SSL
+      with mechanism AWS_MSK_IAM using the service's IRSA role (ADR-024, platform contract 2026-10-08).
+    variables:
+      bootstrapServers:
+        description: MSK IAM bootstrap brokers (port 9098), injected per environment by the platform.
+    security:
+    - $ref: '#/components/securitySchemes/mskIam'
+  local:
+    host: '{bootstrapServers}'
+    protocol: kafka-secure
+    description: Strimzi cluster in namespace kafka, for local and non-AWS environments only. Mutual TLS with Strimzi-issued
+      client certificates.
+    variables:
+      bootstrapServers:
+        description: Strimzi TLS bootstrap service, injected per environment.
+    security:
+    - $ref: '#/components/securitySchemes/mtls'
+channels:
+  account:
+    address: evt.acc.account.v1
+    title: evt.acc.account.v1
+    description: 'Every event of the account aggregate, keyed by aggregateId so that the events of one account stay in order
+      in one partition (ADR-019, one topic per aggregate). The eventType record header names the event: CoreBanking.Account.Opened.v1,
+      CoreBanking.Account.Frozen.v1, CoreBanking.Account.Unfrozen.v1, CoreBanking.Account.Closed.v1, CoreBanking.Account.Debited.v1,
+      CoreBanking.Account.Credited.v1. Consumers skip event types they do not handle.'
+    messages:
+      AccountOpened:
+        $ref: '#/components/messages/AccountOpened'
+      AccountFrozen:
+        $ref: '#/components/messages/AccountFrozen'
+      AccountUnfrozen:
+        $ref: '#/components/messages/AccountUnfrozen'
+      AccountClosed:
+        $ref: '#/components/messages/AccountClosed'
+      AccountDebited:
+        $ref: '#/components/messages/AccountDebited'
+      AccountCredited:
+        $ref: '#/components/messages/AccountCredited'
+    bindings:
+      kafka:
+        topic: evt.acc.account.v1
+        partitions: 3
+        replicas: 3
+        topicConfiguration:
+          cleanup.policy:
+          - delete
+          retention.ms: 604800000
+          max.message.bytes: 1048576
+        bindingVersion: 0.5.0
+operations:
+  publishAccountOpened:
+    action: send
+    title: Publish CoreBanking.Account.Opened.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Opened.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountOpened'
+  publishAccountFrozen:
+    action: send
+    title: Publish CoreBanking.Account.Frozen.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Frozen.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountFrozen'
+  publishAccountUnfrozen:
+    action: send
+    title: Publish CoreBanking.Account.Unfrozen.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Unfrozen.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountUnfrozen'
+  publishAccountClosed:
+    action: send
+    title: Publish CoreBanking.Account.Closed.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Closed.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountClosed'
+  publishAccountDebited:
+    action: send
+    title: Publish CoreBanking.Account.Debited.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Debited.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountDebited'
+  publishAccountCredited:
+    action: send
+    title: Publish CoreBanking.Account.Credited.v1
+    summary: svc-acc-accounts-ledger publishes CoreBanking.Account.Credited.v1 through its transactional outbox.
+    channel:
+      $ref: '#/channels/account'
+    messages:
+    - $ref: '#/channels/account/messages/AccountCredited'
+components:
+  schemas:
+    EventEnvelope:
+      $ref: ./common/event-envelope.yaml#/EventEnvelope
+    EventHeaders:
+      $ref: ./common/event-envelope.yaml#/EventHeaders
+    MonetaryAmount:
+      $ref: ./common/event-envelope.yaml#/MonetaryAmount
+    AccountOpenedData:
+      type: object
+      description: Payload of CoreBanking.Account.Opened.v1.
+      properties:
+        accountId: &id001
+          type: string
+          description: Account id.
+          minLength: 1
+        category:
+          type: string
+          enum:
+          - CUSTOMER
+          - INTERNAL
+        holderId:
+          type:
+          - string
+          - 'null'
+          description: Customer id of the holder; null for an internal account.
+        accountType:
+          type: string
+          enum:
+          - CURRENT
+          - SAVINGS
+          - INVESTMENT
+          - BUSINESS
+          - INTERNAL
+        currency:
+          type: string
+          pattern: ^[A-Z]{3}$
+        islamicCompliant:
+          type: boolean
+      required:
+      - accountId
+      - category
+      - holderId
+      - accountType
+      - currency
+      - islamicCompliant
+      additionalProperties: false
+    AccountFrozenData:
+      type: object
+      description: Payload of CoreBanking.Account.Frozen.v1.
+      properties:
+        accountId: *id001
+      required:
+      - accountId
+      additionalProperties: false
+    AccountUnfrozenData:
+      type: object
+      description: Payload of CoreBanking.Account.Unfrozen.v1.
+      properties:
+        accountId: *id001
+      required:
+      - accountId
+      additionalProperties: false
+    AccountClosedData:
+      type: object
+      description: Payload of CoreBanking.Account.Closed.v1.
+      properties:
+        accountId: *id001
+      required:
+      - accountId
+      additionalProperties: false
+    AccountDebitedData:
+      type: object
+      description: Payload of CoreBanking.Account.Debited.v1.
+      properties:
+        accountId: *id001
+        journalEntryId: &id002
+          type: string
+          description: Journal entry that moved the balance.
+          minLength: 1
+        amount:
+          allOf:
+          - $ref: '#/components/schemas/MonetaryAmount'
+          description: Debited amount.
+        balanceAfter:
+          allOf:
+          - $ref: '#/components/schemas/MonetaryAmount'
+          description: Booked balance after the debit; may be negative only for an internal account.
+      required:
+      - accountId
+      - journalEntryId
+      - amount
+      - balanceAfter
+      additionalProperties: false
+    AccountCreditedData:
+      type: object
+      description: Payload of CoreBanking.Account.Credited.v1.
+      properties:
+        accountId: *id001
+        journalEntryId: *id002
+        amount:
+          allOf:
+          - $ref: '#/components/schemas/MonetaryAmount'
+          description: Credited amount.
+        balanceAfter:
+          allOf:
+          - $ref: '#/components/schemas/MonetaryAmount'
+          description: Booked balance after the credit.
+      required:
+      - accountId
+      - journalEntryId
+      - amount
+      - balanceAfter
+      additionalProperties: false
+  messages:
+    AccountOpened:
+      name: AccountOpened
+      title: CoreBanking.Account.Opened.v1
+      summary: An account was opened.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Opened.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Opened.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountOpenedData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Opened
+    AccountFrozen:
+      name: AccountFrozen
+      title: CoreBanking.Account.Frozen.v1
+      summary: The account was frozen; it takes no postings until unfrozen.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Frozen.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Frozen.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountFrozenData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Frozen
+    AccountUnfrozen:
+      name: AccountUnfrozen
+      title: CoreBanking.Account.Unfrozen.v1
+      summary: The account is active again.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Unfrozen.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Unfrozen.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountUnfrozenData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Unfrozen
+    AccountClosed:
+      name: AccountClosed
+      title: CoreBanking.Account.Closed.v1
+      summary: The account was closed with a zero balance.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Closed.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Closed.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountClosedData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Closed
+    AccountDebited:
+      name: AccountDebited
+      title: CoreBanking.Account.Debited.v1
+      summary: A journal entry lowered the balance.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Debited.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Debited.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountDebitedData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Debited
+    AccountCredited:
+      name: AccountCredited
+      title: CoreBanking.Account.Credited.v1
+      summary: A journal entry raised the balance.
+      contentType: application/json
+      headers:
+        allOf:
+        - $ref: '#/components/schemas/EventHeaders'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Credited.v1
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: CoreBanking.Account.Credited.v1
+            producer:
+              const: svc-acc-accounts-ledger
+            data:
+              $ref: '#/components/schemas/AccountCreditedData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: aggregateId (accountId).
+          bindingVersion: 0.5.0
+      x-source-class: com.bank.accounts.domain.AccountEvent$Credited
+  securitySchemes:
+    mskIam:
+      type: userPassword
+      description: SASL_SSL with SASL mechanism AWS_MSK_IAM. There is no user or password; the client signs with the AWS
+        credentials of its IRSA role, and a topic-scoped IAM policy (terraform module msk-client-access) grants produce
+        or consume rights. AsyncAPI has no IAM scheme type, so userPassword stands for the SASL family.
+      x-sasl-mechanism: AWS_MSK_IAM
+    mtls:
+      type: X509
+      description: Mutual TLS with Strimzi-issued client certificates (local and non-AWS clusters only).

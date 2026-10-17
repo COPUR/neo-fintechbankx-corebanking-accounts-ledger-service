@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accounts.name" . | quote }}
+  labels:
+    {{- include "accounts.labels" . | nindent 4 }}
+spec:
+  {{- $min := .Values.podDisruptionBudget.minAvailable }}
+  {{- if or (kindIs "int" $min) (kindIs "int64" $min) (and (kindIs "float64" $min) (eq $min (floor $min))) }}
+  minAvailable: {{ $min | int }}
+  {{- else if and (kindIs "string" $min) (regexMatch "^[0-9]{1,3}%$" $min) }}
+  minAvailable: {{ $min | quote }}
+  {{- else }}
+  {{- fail (printf "podDisruptionBudget.minAvailable must be an integer or a percentage string like \"50%%\", got %q" (toString $min)) }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accounts.selectorLabels" . | nindent 6 }}

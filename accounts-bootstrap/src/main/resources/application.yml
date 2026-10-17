@@ -1,0 +1,151 @@
+# svc-acc-accounts-ledger runtime configuration.
+# Every environment-specific value comes from the environment (Helm values,
+# Kubernetes Secret synced from AWS Secrets Manager); nothing secret is here.
+spring:
+  application:
+    # Naming standard: app.<context>.<capability>; the service id stays svc-acc-accounts-ledger.
+    name: app.acc.accounts-ledger
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 25s
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/db_acc_accounts_ledger_local}
+    username: ${DB_USERNAME:accounts_ledger_app}
+    # The credential is bound from SPRING_DATASOURCE_PASSWORD (Kubernetes Secret
+    # synced from AWS Secrets Manager); it is never written in this file.
+    hikari:
+      schema: sc_acc_accounts_ledger
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: 3000
+      max-lifetime: 1200000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: sc_acc_accounts_ledger
+        jdbc:
+          time_zone: UTC
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+  flyway:
+    # Migrations run as the schema owner (DB_MIGRATION_USERNAME / _PASSWORD,
+    # secret <env>/accounts-ledger-service/db-migration), deployed
+    # as the Helm pre-install/pre-upgrade Job "migrate"; the pods get only the
+    # runtime role (DB_USERNAME, secret db-app) and run with
+    # SPRING_FLYWAY_ENABLED=false. V3 grants the runtime role its DML. Without
+    # DB_MIGRATION_* (local runs) Flyway uses the app credentials.
+    user: ${DB_MIGRATION_USERNAME:${spring.datasource.username}}
+    password: ${DB_MIGRATION_PASSWORD:${spring.datasource.password:}}
+    placeholders:
+      runtime_role: ${spring.datasource.username}
+    schemas: sc_acc_accounts_ledger
+    default-schema: sc_acc_accounts_ledger
+    create-schemas: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # Security comes from the kafka-msk or kafka-strimzi profile; PLAINTEXT is local only.
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    client-id: svc-acc-accounts-ledger
+    # Topics are created by the platform (event-streaming repo), never by the service.
+    admin:
+      auto-create: false
+    producer:
+      acks: all
+      compression-type: lz4
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        # Kafka requires delivery.timeout.ms >= linger.ms + request.timeout.ms,
+        # otherwise the producer cannot be constructed.
+        delivery.timeout.ms: 30000
+        request.timeout.ms: 20000
+        linger.ms: 5
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/fintechbankx}
+          jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/certs}
+
+server:
+  port: 8080
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+management:
+  server:
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+        liveness:
+          include: livenessState
+  metrics:
+    tags:
+      service: svc-acc-accounts-ledger
+      squad: corebanking
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  observations:
+    key-values:
+      service: svc-acc-accounts-ledger
+
+fintechbankx:
+  tls:
+    # Startup TLS assertion (governance round 3, hardened in round 6;
+    # TlsEnforcementConfiguration, in the service and in the migrate Job): the
+    # service refuses to start unless every datasource URL a pool can use
+    # (spring.datasource.url, spring.datasource.hikari.jdbc-url, spring.flyway.url)
+    # carries sslmode=verify-full once, read the way PgJDBC reads it, with no
+    # sslfactory, sslhostnameverifier or ssl driver property, and the producer's
+    # effective security.protocol is SASL_SSL (SSL on the Strimzi mutual-TLS
+    # listener). Only the local profile (application-local.yml) and test
+    # configuration set this false; the Helm chart refuses to set it, to activate
+    # a profile or to pass a JVM option that would.
+    enforce: true
+
+accounts:
+  security:
+    # Tokens must carry this service id in aud (platform contract).
+    audience: ${OIDC_AUDIENCE:svc-acc-accounts-ledger}
+    # Client ids (token azp) whose SERVICE tokens may post journal entries;
+    # comma-separated. Admins need no entry.
+    service-callers: ${SERVICE_CALLERS:svc-pay-initiation-settlement,svc-pay-recurring-mandates,svc-pay-bulk-orchestration,svc-ln-loan-lifecycle}
+  outbox:
+    retention: P7D
+    relay:
+      # Off unless the deployment turns it on (Helm config.OUTBOX_RELAY_ENABLED).
+      enabled: ${OUTBOX_RELAY_ENABLED:false}
+      interval: PT1S
+      batch-size: 100
+      # ADR-021 decision 4: only payload errors park a row; any other failure
+      # stops the batch, marks nothing and backs off (1 s doubling to 5 min).
+      # A parked row holds back its account's later rows until it is replayed.
+      # Alert on outbox_oldest_pending_age_seconds and any increase of
+      # outbox_parked_events_total; outbox_send_failures_total{exception} says why.
+      # Longer than the producer's delivery.timeout.ms (30 s), so the producer
+      # reports its own outcome before the relay gives up waiting.
+      send-timeout: PT35S
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name},%X{traceId:-},%X{spanId:-},%X{correlationId:-}]"

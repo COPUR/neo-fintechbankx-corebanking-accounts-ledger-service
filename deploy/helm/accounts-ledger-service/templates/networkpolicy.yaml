@@ -1,0 +1,36 @@
+{{- if .Values.networkPolicy.enabled }}
+# Opt-in only: NetworkPolicy belongs to the mesh repo. Namespaces only, never a
+# CIDR. The mesh (default-deny AuthorizationPolicy, STRICT mTLS) authorises
+# callers by principal on top of this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "accounts.name" . | quote }}
+  labels:
+    {{- include "accounts.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "accounts.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.apiNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port | int }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace | quote }}
+      ports:
+        - protocol: TCP
+          port: 15020
+        - protocol: TCP
+          port: {{ .Values.service.managementPort | int }}
+{{- end }}

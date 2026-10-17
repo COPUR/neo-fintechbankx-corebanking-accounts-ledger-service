@@ -22,10 +22,41 @@ app.kubernetes.io/component: service
 
 {{- define "accounts.labels" -}}
 {{ include "accounts.baseLabels" . }}
-app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "accounts.version" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 fintechbankx.io/squad: {{ required "squad is required (corebanking)" .Values.squad | quote }}
+{{- end -}}
+
+{{- /*
+The container image, by digest only: <repository>@sha256:<64 hex>, the
+reference the helm-deploy job verifies with cosign (cicd-templates render
+guard). A tag never reaches an image line.
+*/ -}}
+{{- define "accounts.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $digest := required "image.digest is required (sha256:<64 hex>; the pods run the image by digest)" .Values.image.digest -}}
+{{- if regexMatch "[:@]" (regexReplaceAll "^[^/]*/" $repository "") -}}
+{{- fail (printf "image.repository must not carry a tag or digest, got %q" $repository) -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail (printf "image.digest must be sha256:<64 lowercase hex>, got %q" $digest) -}}
+{{- end -}}
+{{- printf "%s@%s" $repository $digest -}}
+{{- end -}}
+
+{{- /*
+Value of the version and app.kubernetes.io/version labels: image.tag when set,
+else the first 12 hex digits of image.digest (a label value cannot hold ':').
+*/ -}}
+{{- define "accounts.version" -}}
+{{- if .Values.image.tag -}}
+{{- .Values.image.tag -}}
+{{- else if .Values.image.digest -}}
+{{- trunc 12 (trimPrefix "sha256:" .Values.image.digest) -}}
+{{- else -}}
+{{- .Chart.AppVersion -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "accounts.secretName" -}}

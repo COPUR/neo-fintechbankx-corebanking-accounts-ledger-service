@@ -24,7 +24,7 @@ spec:
         {{- include "accounts.selectorLabels" . | nindent 8 }}
         {{- toYaml .Values.podLabels | nindent 8 }}
         app: {{ .Values.serviceAccount.name | quote }}
-        version: {{ .Values.image.tag | quote }}
+        version: {{ include "accounts.version" . | quote }}
         fintechbankx.io/squad: {{ .Values.squad | quote }}
       annotations:
         sidecar.istio.io/inject: "true"
@@ -64,7 +64,7 @@ spec:
               {{- include "accounts.selectorLabels" . | nindent 14 }}
       containers:
         - name: accounts-ledger-service
-          image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+          image: {{ include "accounts.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           ports:
             - name: http

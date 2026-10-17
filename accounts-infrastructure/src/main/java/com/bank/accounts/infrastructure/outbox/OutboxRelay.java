@@ -58,7 +58,7 @@ import java.util.concurrent.TimeoutException;
  *   tagged with the exception's simple class name (never an id).</li>
  * </ul>
  * Only an operator parks such a row, by hand and with a recorded park_reason
- * (runbook section 7); the relay counts each such park once, under its lock,
+ * (docs/RUNBOOK.md, Outbox); the relay counts each such park once, under its lock,
  * as outbox.parked.events{exception="OperatorPark"} (park_counted, V2). The outage alert is outbox_oldest_pending_age_seconds.
  */
 public class OutboxRelay {
@@ -197,7 +197,7 @@ public class OutboxRelay {
     }
 
     /**
-     * Operator parks happen in SQL (runbook section 7); count each once with
+     * Operator parks happen in SQL (docs/RUNBOOK.md, Outbox); count each once with
      * exception="OperatorPark". Runs only while this replica holds the relay
      * lock, so one replica counts.
      */

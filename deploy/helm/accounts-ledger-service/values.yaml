@@ -1,9 +1,14 @@
 # Defaults are production-shaped (multi-replica, spread across zones).
 # Override per environment with values-<env>.yaml.
 
+# The pods run the image by digest only: repository@digest, the reference cosign
+# verifies in the cicd-templates helm-deploy job (its render guard refuses any other
+# image line). helm-deploy sets image.repository and image.digest; image.tag is
+# optional and only names the version labels (git SHA; never "latest").
 image:
   repository: ""   # e.g. <account>.dkr.ecr.<region>.amazonaws.com/fintechbankx/accounts-ledger-service
-  tag: ""          # immutable tag (git SHA); never "latest"
+  digest: ""       # sha256:<64 hex>
+  tag: ""
   pullPolicy: IfNotPresent
 
 replicaCount: 3

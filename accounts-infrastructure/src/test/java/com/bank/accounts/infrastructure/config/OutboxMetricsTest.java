@@ -24,7 +24,7 @@ class OutboxMetricsTest {
         when(outbox.oldestPendingOccurredAt()).thenReturn(NOW.minusSeconds(90));
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
-        new OutboxConfiguration().outboxMetrics(registry, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
+        new OutboxConfiguration.RelayMetricsConfiguration().outboxMetrics(registry, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
 
         assertThat(registry.get("outbox.pending.events").gauge().value()).isEqualTo(4.0);
         // outbox.parked.events is the relay's counter (outbox_parked_events_total, Kafka guide 5f7d546), never a gauge.
@@ -38,7 +38,7 @@ class OutboxMetricsTest {
         SpringDataOutboxRepository outbox = mock(SpringDataOutboxRepository.class);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
-        new OutboxConfiguration().outboxMetrics(registry, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
+        new OutboxConfiguration.RelayMetricsConfiguration().outboxMetrics(registry, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
 
         assertThat(registry.get("outbox.oldest.pending.age.seconds").gauge().value()).isZero();
     }

@@ -36,16 +36,24 @@ public class OutboxConfiguration {
     }
 
     /**
-     * Outbox health gauges, exported as outbox_pending_events and
-     * outbox_oldest_pending_age_seconds (the outage alert: under ADR-021
-     * decision 4 only payload errors park a row, so any other send failure
+     * Outbox health gauges, exported as outbox_pending_events, outbox_parked_rows and
+     * outbox_oldest_pending_age_seconds (the outage alert OutboxRelayStalled: under
+     * ADR-021 decision 4 only payload errors park a row, so any other send failure
      * stops the relay and this age grows until it is fixed). The relay's own
      * counters are outbox_send_failures_total{exception} and
      * outbox_parked_events_total{exception} (Kafka guide 5f7d546).
+     * Registered only where the relay runs: with it off nothing publishes, the age
+     * would climb from the first write and page the squad for a relay that is off
+     * on purpose (docs/RUNBOOK.md, Outbox).
      */
-    @Bean
-    OutboxMetrics outboxMetrics(MeterRegistry registry, SpringDataOutboxRepository outbox, Clock clock) {
-        return OutboxMetrics.register(registry, outbox, clock);
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "accounts.outbox.relay.enabled", havingValue = "true")
+    static class RelayMetricsConfiguration {
+
+        @Bean
+        OutboxMetrics outboxMetrics(MeterRegistry registry, SpringDataOutboxRepository outbox, Clock clock) {
+            return OutboxMetrics.register(registry, outbox, clock);
+        }
     }
 
     static final class OutboxMetrics {

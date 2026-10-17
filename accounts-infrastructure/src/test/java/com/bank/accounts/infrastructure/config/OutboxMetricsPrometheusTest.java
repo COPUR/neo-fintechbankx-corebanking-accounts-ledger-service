@@ -36,7 +36,7 @@ class OutboxMetricsPrometheusTest {
         when(outbox.countByParkedAtIsNotNull()).thenReturn(2L);
         when(outbox.oldestPendingOccurredAt()).thenReturn(NOW.minusSeconds(30));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        OutboxConfiguration configuration = new OutboxConfiguration();
+        OutboxConfiguration.RelayMetricsConfiguration configuration = new OutboxConfiguration.RelayMetricsConfiguration();
         configuration.outboxMetrics(registry, outbox, clock);
         OutboxRelay relay = new OutboxRelay(outbox, mock(KafkaTemplate.class), mock(TransactionTemplate.class),
             java.util.Optional::empty, clock,

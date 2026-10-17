@@ -34,9 +34,10 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-acc-accounts-ledger**
 | Integration tests against a local PostgreSQL 16 | set `TEST_DB_URL` (for example `jdbc:postgresql://localhost:5432/db_acc_accounts_ledger_test`), `TEST_DB_USERNAME` (`accounts_test`) and, unless the database trusts local clients, `TEST_DB_PASSWORD` (the owner role's password, from your own store), then `./gradlew :accounts-bootstrap:test`; the owner role needs `CREATEROLE` (the tests create the runtime role `accounts_runtime_it`) |
 | Run locally without TLS | `SPRING_PROFILES_ACTIVE=local` (relaxes the startup TLS assertion for a local database and Kafka; never set in a deployment) |
 | Database migrations | `accounts-infrastructure/src/main/resources/db/migration` (V1 ledger tables, V2 outbox, V3 runtime-role grants: journal rows are insert-only) |
-| Kubernetes | `deploy/helm/accounts-ledger-service`; `templates/_fbx_helpers.tpl` is the cicd-templates `fbx.guard` copied byte for byte and checked by `scripts/ci/verify-vendored-guard.sh` |
+| Kubernetes | `deploy/helm/accounts-ledger-service` (image by digest only: `image.repository` plus `image.digest`, as the cicd-templates helm-deploy job passes them); `templates/_fbx_helpers.tpl` is the cicd-templates `fbx.guard` copied byte for byte and checked by `scripts/ci/verify-vendored-guard.sh` |
 | AWS infrastructure | `deploy/terraform` |
 | Consumer contract | [docs/CONSUMER_CONTRACT.md](docs/CONSUMER_CONTRACT.md) |
+| Operations (outbox relay switch, metrics, park, replay, discard) | [docs/RUNBOOK.md](docs/RUNBOOK.md) |
 
 Module layout (service guardrails, ADR-028/029): `accounts-domain` holds the `Account` aggregate, the `JournalEntry` entity, `domain.exception`, `domain.port.in` (`OpenAccountUseCase`, `FindAccountUseCase`, `ManageAccountUseCase`, `PostJournalEntryUseCase`, `FindJournalEntryUseCase`) and `domain.port.out` (`AccountRepository`, `JournalEntryRepository`, `AccountEventPort`). `accounts-application` holds `AccountsLedgerService`; `accounts-infrastructure` holds the JPA adapters, the transactional outbox and relay, the web adapters and configuration; `accounts-bootstrap` is the Spring Boot application. Everything lives under `com.bank.accounts` (plus `com.bank.shared.kernel`).
 

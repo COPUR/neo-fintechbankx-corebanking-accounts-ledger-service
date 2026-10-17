@@ -3,7 +3,8 @@
 # in .github/workflows/deployability.yml. It lives here, not inline, because GitHub
 # turns a run: block that contains an expression into one expression and refuses
 # the whole workflow above 21,000 characters (zero-job startup failure). The image
-# tag comes from GITHUB_SHA, which the runner sets to the same value as github.sha.
+# tag comes from GITHUB_SHA, which the runner sets to the same value as github.sha;
+# the digest is a fixed dummy, as helm-deploy passes a real one.
 set -e
 : "${GITHUB_SHA:?GITHUB_SHA must be set (the runner sets it)}"
 # The selector, scope and naming checks need PyYAML. The fbx-ci VM's Ubuntu Python refuses
@@ -17,7 +18,8 @@ if ! python3 -c "import yaml" 2>/dev/null; then
   export PATH="$venv/bin:$PATH"
 fi
 chart=deploy/helm/accounts-ledger-service
-args="--set image.repository=ci/accounts-ledger-service --set image.tag=${GITHUB_SHA} --set externalSecret.remoteSecretName=dev/accounts-ledger-service/db-app --set migration.remoteSecretName=dev/accounts-ledger-service/db-migration"
+image_digest="sha256:$(printf '%064d' 0)"
+args="--set image.repository=ci/accounts-ledger-service --set image.digest=${image_digest} --set image.tag=${GITHUB_SHA} --set externalSecret.remoteSecretName=dev/accounts-ledger-service/db-app --set migration.remoteSecretName=dev/accounts-ledger-service/db-migration"
 # Dummy values for the chart's required config; real ones come per environment.
 required="--set-string config.DB_URL=jdbc:postgresql://ci-db:5432/db_acc_accounts_ledger_ci?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set config.KAFKA_BOOTSTRAP_SERVERS=ci-kafka:9098 --set config.OIDC_ISSUER_URI=https://ci-idp/realms/fintechbankx --set config.OIDC_JWK_SET_URI=https://ci-idp/realms/fintechbankx/protocol/openid-connect/certs"
 # refuse <expected ERE> <helm args...>: the render must fail, and for that reason, so a probe cannot
@@ -41,6 +43,18 @@ helm template ci "$chart" $args $required --set kafka.flavour=strimzi > /dev/nul
 refuse 'externalSecret\.remoteSecretName must be <env>/accounts-ledger-service/<name>' --set externalSecret.remoteSecretName=dev-accounts-ledger-service/db-app
 # The pods verify Aurora's certificate against the platform RDS CA bundle.
 rendered="$(helm template ci "$chart" $args $required)"
+# Images by digest only (cicd-templates helm-deploy render guard): every image line of the
+# render is the repository@digest cosign verifies, in the pods and the migration Job.
+want_image="ci/accounts-ledger-service@${image_digest}"
+image_lines="$(grep -E "image[\"']?[[:space:]]*:" <<<"$rendered")"
+test "$(wc -l <<<"$image_lines")" -eq 2
+if grep -vqE "^[[:space:]]*(- )?image: \"${want_image}\"$" <<<"$image_lines"; then
+  echo "::error::an image line is not ${want_image}: $image_lines"; exit 1
+fi
+refuse 'image\.digest is required' --set image.digest=
+refuse 'image\.digest must be sha256:<64 lowercase hex>' --set image.digest=latest
+refuse 'image\.digest must be sha256:<64 lowercase hex>' --set image.digest=sha256:ABC
+refuse 'image\.repository must not carry a tag or digest' --set image.repository=ci/accounts-ledger-service:v1
 grep -q 'name: "rds-ca-bundle"' <<<"$rendered"
 grep -q 'mountPath: "/etc/fintechbankx/rds-ca"' <<<"$rendered"
 # cicd-templates 4f0f266: mounted at /etc/fintechbankx/rds-ca, exported as DB_SSL_ROOT_CERT,

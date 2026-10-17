@@ -6,6 +6,14 @@
 # tag comes from GITHUB_SHA, which the runner sets to the same value as github.sha.
 set -e
 : "${GITHUB_SHA:?GITHUB_SHA must be set (the runner sets it)}"
+# The selector, scope and naming checks need PyYAML. The fbx-ci VM's Ubuntu Python refuses
+# pip install --user (PEP 668, externally managed), so a missing PyYAML goes into a venv of its own.
+if ! python3 -c "import yaml" 2>/dev/null; then
+  venv="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fbx-chart-probes-venv"
+  python3 -m venv "$venv"
+  "$venv/bin/python" -m pip install --quiet pyyaml==6.0.2
+  export PATH="$venv/bin:$PATH"
+fi
 chart=deploy/helm/accounts-ledger-service
 args="--set image.repository=ci/accounts-ledger-service --set image.tag=${GITHUB_SHA} --set externalSecret.remoteSecretName=dev/accounts-ledger-service/db-app --set migration.remoteSecretName=dev/accounts-ledger-service/db-migration"
 # Dummy values for the chart's required config; real ones come per environment.
@@ -63,7 +71,6 @@ fi
 # keys only under <env>/<SA>/, no dataFrom or sourceRef (hook resources included).
 helm template ci "$chart" $args $required | python3 scripts/ci/externalsecret-scope.py accounts-ledger-service dev
 # Secret naming contract, the check copied from customer-profile-kyc-core 58f7369.
-python3 -c "import yaml" 2>/dev/null || python3 -m pip install --user pyyaml==6.0.2
 helm template ci "$chart" $args $required | python3 scripts/ci/externalsecret-naming.py --env dev
 helm template ci "$chart" -f "$chart/values-dev.yaml" $args $required | python3 scripts/ci/externalsecret-naming.py --env dev
 for wrong in "--set serviceAccount.name=some-other-service" \
@@ -405,7 +412,6 @@ for bad in abc 50 '5000%' '%' "$(printf '50%%\nx')"; do
 done
 # Platform round 7: the migration Job runs as its own hook ServiceAccount (no token, no IAM
 # role), created before the Job, never the chart's account or the namespace default.
-python3 -c "import yaml" 2>/dev/null || python3 -m pip install --user pyyaml==6.0.2
 helm template ci "$chart" $args $required | python3 -c '
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]

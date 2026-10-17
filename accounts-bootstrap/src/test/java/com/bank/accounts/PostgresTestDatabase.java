@@ -87,6 +87,37 @@ final class PostgresTestDatabase {
         return new JdbcTemplate(new DriverManagerDataSource(url, ownerUser, ownerPassword));
     }
 
+    /** A login that is neither owner nor runtime role, like an operator's personal login. */
+    static final String OPERATOR_ROLE = "accounts_operator_it";
+
+    /**
+     * An operator's personal login: may read the outbox and update it (park, replay, request a
+     * discard), nothing else. Created and granted on first use, after Flyway built the schema.
+     * UPDATE is table-wide here, wider than the runbook's column grant, so the ITs show the guard
+     * trigger holds on its own.
+     */
+    static synchronized JdbcTemplate operator() {
+        JdbcTemplate owner = owner();
+        owner.execute("""
+            do $$
+            begin
+                if not exists (select 1 from pg_roles where rolname = '%1$s') then
+                    create role %1$s login password '%2$s';
+                end if;
+            end $$
+            """.formatted(OPERATOR_ROLE, RUNTIME_PASSWORD));
+        owner.execute("grant usage on schema sc_acc_accounts_ledger to " + OPERATOR_ROLE);
+        owner.execute("grant select, update on sc_acc_accounts_ledger.outbox_event to " + OPERATOR_ROLE);
+        owner.execute("grant select on sc_acc_accounts_ledger.outbox_discard_audit to " + OPERATOR_ROLE);
+        return new JdbcTemplate(new DriverManagerDataSource(url, OPERATOR_ROLE, RUNTIME_PASSWORD));
+    }
+
+    /** A raw connection as the schema owner, for tests that hold a transaction open. */
+    static synchronized java.sql.Connection ownerConnection() throws java.sql.SQLException {
+        start();
+        return java.sql.DriverManager.getConnection(url, ownerUser, ownerPassword);
+    }
+
     /** A plain connection as the runtime role, outside the application. */
     static synchronized JdbcTemplate runtime() {
         start();

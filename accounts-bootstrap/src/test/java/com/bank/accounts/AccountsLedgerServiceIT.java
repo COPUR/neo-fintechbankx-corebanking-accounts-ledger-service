@@ -10,6 +10,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -30,8 +31,11 @@ import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -88,7 +92,8 @@ class AccountsLedgerServiceIT {
     void cleanTablesAndOpenTheClearingAccount() throws Exception {
         // As the schema owner: the runtime role may not delete ledger rows.
         JdbcTemplate owner = PostgresTestDatabase.owner();
-        owner.update("delete from " + SCHEMA + ".outbox_event");
+        // TRUNCATE: the discard guard refuses deleting unpublished outbox rows, row by row.
+        owner.execute("truncate " + SCHEMA + ".outbox_discard_audit, " + SCHEMA + ".outbox_event");
         owner.update("delete from " + SCHEMA + ".posting_line");
         owner.update("delete from " + SCHEMA + ".journal_entry");
         owner.update("delete from " + SCHEMA + ".account");
@@ -138,6 +143,25 @@ class AccountsLedgerServiceIT {
         BigDecimal total = jdbc.queryForObject("select sum(booked_balance) from " + SCHEMA + ".account", BigDecimal.class);
         assertThat(total).isEqualByComparingTo("0");
         assertThat(jdbc.queryForObject("select count(*) from " + SCHEMA + ".journal_entry", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void theOpenAndBookResponsesAnswerTheStoredInstant() throws Exception {
+        String response = mvc.perform(asBanker(post("/api/v1/accounts")).header("x-idempotency-key", "k-time")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"customerId\":\"CUST-T\",\"accountType\":\"CURRENT\",\"currency\":\"AED\"}"))
+            .andExpect(status().isCreated())
+            .andReturn().getResponse().getContentAsString();
+        JsonNode opened = json.readTree(response);
+        String account = opened.get("accountId").asText();
+        assertThat(Instant.parse(opened.get("openedAt").asText())).isEqualTo(jdbc.queryForObject(
+            "select opened_at from " + SCHEMA + ".account where account_id = ?", Instant.class, account));
+
+        JsonNode booked = json.readTree(book(entry("TIME-1", clearing, account, "1.00"))
+            .andExpect(status().isCreated())
+            .andReturn().getResponse().getContentAsString());
+        assertThat(Instant.parse(booked.get("bookedAt").asText())).isEqualTo(jdbc.queryForObject(
+            "select booked_at from " + SCHEMA + ".journal_entry where reference = 'TIME-1'", Instant.class));
     }
 
     @Test
@@ -239,6 +263,386 @@ class AccountsLedgerServiceIT {
         JsonNode credited = json.readTree(sent.get(3).value());
         assertThat(credited.at("/data/balanceAfter/amount").asText()).isEqualTo("5.00");
         assertThat(credited.get("producer").asText()).isEqualTo("svc-acc-accounts-ledger");
+    }
+
+    /**
+     * The runbook discard, as an operator runs it: park, then request the discard in SQL. The relay
+     * audits it with the requesting database user (not the value the UPDATE supplies), never sends
+     * it, releases the account's later events, and counts it; the runtime role cannot rewrite the audit.
+     */
+    @Test
+    void anOperatorDiscardIsAuditedWithWhoAskedAndReleasesTheAccountsLaterEvents() throws Exception {
+        String alice = open("CUST-D", "CURRENT", "k-d");
+        book(entry("FUND-D", clearing, alice, "5.00")).andExpect(status().isCreated());
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, alice);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-1: test'"
+            + " where event_id = ? and published_at is null and parked_at is null", opened);
+        assertThatThrownBy(() -> owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now()"
+            + " where event_id = ?", opened)).hasMessageContaining("ck_outbox_discard_reason");
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'INC-1: consumers agreed', discard_requested_by = 'someone-else'"
+            + " where event_id = ? and parked_at is not null and published_at is null", opened);
+        List<ProducerRecord<String, String>> sent = new ArrayList<>();
+        when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture((SendResult<String, String>) null);
+        });
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
+            new PostgresSessionRelayLock(dataSource, OutboxRelay.RELAY_LOCK_KEY), Clock.systemUTC(), 100,
+            Duration.ofSeconds(5), Duration.ofDays(7), meters);
+
+        assertThat(relay.relayOnce()).isEqualTo(3);
+        assertThat(relay.relayOnce()).isZero();
+
+        assertThat(sent).extracting(ProducerRecord::key).containsExactly(clearing, clearing, alice);
+        assertThat(sent.get(2).headers().lastHeader("eventType").value())
+            .asString().isEqualTo("CoreBanking.Account.Credited.v1");
+        Map<String, Object> audit = owner.queryForMap("select * from " + SCHEMA + ".outbox_discard_audit");
+        assertThat(audit).containsEntry("event_id", opened)
+            .containsEntry("aggregate_id", alice)
+            .containsEntry("event_type", "CoreBanking.Account.Opened.v1")
+            .containsEntry("park_reason", "INC-1: test")
+            .containsEntry("discard_reason", "INC-1: consumers agreed")
+            .containsEntry("requested_by", PostgresTestDatabase.ownerUser());
+        assertThat(owner.queryForObject("select published_at is not null and parked_at is null from " + SCHEMA
+            + ".outbox_event where event_id = ?", Boolean.class, opened)).isTrue();
+        assertThat(meters.get("outbox.discarded.events").counter().count()).isEqualTo(1.0);
+        for (String privilege : List.of("UPDATE", "DELETE", "TRUNCATE")) {
+            assertThat(jdbc.queryForObject("select has_table_privilege(current_user, ?, ?)", Boolean.class,
+                SCHEMA + ".outbox_discard_audit", privilege)).as(privilege).isFalse();
+        }
+        assertThat(jdbc.queryForObject("select has_table_privilege(current_user, ?, 'INSERT')", Boolean.class,
+            SCHEMA + ".outbox_discard_audit")).isTrue();
+    }
+
+    /**
+     * DevSecOps on 6bd4d32: the service's own database role must not be able to name another
+     * requester, neither by inserting an outbox row that already carries a discard request nor by
+     * writing an audit row itself. Runs as the runtime role (jdbc), the owner plays the operator.
+     */
+    @Test
+    void theRuntimeRoleCannotForgeTheDiscardRequesterNorTheAuditRow() throws Exception {
+        String bob = open("CUST-F", "CURRENT", "k-f");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, bob);
+
+        // 1. An INSERT that carries a request is refused, whoever it names.
+        assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type,"
+            + " aggregate_id, aggregate_version, event_type, payload, correlation_id, occurred_at, parked_at,"
+            + " park_reason, discard_requested_at, discard_reason, discard_requested_by) values (?, 'Account', ?, 9,"
+            + " 'CoreBanking.Account.Debited.v1', '{}'::jsonb, 'c', now(), now(), 'forged', now(), 'forged',"
+            + " 'ops_alice')", UUID.randomUUID(), bob))
+            .hasMessageContaining("outbox discard can only be requested by UPDATE");
+
+        // 2a. An audit row for an event without a pending request is refused.
+        String forgedAudit = "insert into " + SCHEMA + ".outbox_discard_audit (event_id, aggregate_type, aggregate_id,"
+            + " aggregate_version, event_type, payload, occurred_at, parked_at, park_reason, discard_reason,"
+            + " requested_by, requested_at, discarded_at) values (?, 'X', 'other', 0, 'Forged', '{}'::jsonb, now(),"
+            + " now(), 'f', 'forged', 'ops_alice', now() - interval '1 day', now() - interval '1 day')";
+        assertThatThrownBy(() -> jdbc.update(forgedAudit, opened)).hasMessageContaining("has no pending discard request");
+
+        // 2b. With a real request, every column the INSERT supplies is replaced from the outbox row.
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-2: test'"
+            + " where event_id = ?", opened);
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'INC-2: consumers agreed' where event_id = ?", opened);
+        jdbc.update(forgedAudit, opened);
+        Map<String, Object> audit = owner.queryForMap("select * from " + SCHEMA + ".outbox_discard_audit"
+            + " where event_id = ?", opened);
+        assertThat(audit).containsEntry("aggregate_id", bob)
+            .containsEntry("event_type", "CoreBanking.Account.Opened.v1")
+            .containsEntry("park_reason", "INC-2: test")
+            .containsEntry("discard_reason", "INC-2: consumers agreed")
+            .containsEntry("requested_by", PostgresTestDatabase.ownerUser());
+        assertThat(owner.queryForObject("select requested_at = o.discard_requested_at from " + SCHEMA
+            + ".outbox_discard_audit a join " + SCHEMA + ".outbox_event o using (event_id) where event_id = ?",
+            Boolean.class, opened)).isTrue();
+
+        // 3. The service role can neither name another requester nor request, change or withdraw one.
+        for (String change : List.of("discard_requested_by = 'ops_alice'", "discard_reason = 'forged'",
+                "discard_requested_at = null")) {
+            assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set " + change
+                + " where event_id = ?", opened)).as(change)
+                .rootCause().hasMessageContaining("the service role cannot request, change or withdraw an outbox discard");
+        }
+    }
+
+    /**
+     * DevSecOps on b5edc1c (B1): while a discard is pending, the service role must not be able to
+     * rewrite what the audit will copy, take the row out of the outbox without an audit row, or
+     * delete an unpublished row; the requester's time is the database's, not the statement's (S2).
+     */
+    @Test
+    void aPendingDiscardRequestFreezesTheRowForTheServiceRole() throws Exception {
+        String carol = open("CUST-P", "CURRENT", "k-p");
+        String other = open("CUST-Q", "CURRENT", "k-q");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        String byType = "select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'";
+        UUID opened = owner.queryForObject(byType, UUID.class, carol);
+        UUID otherOpened = owner.queryForObject(byType, UUID.class, other);
+
+        // The service role cannot request a discard under its own name either.
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-3: test'"
+            + " where event_id = ?", opened);
+        assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'runtime' where event_id = ?", opened))
+            .rootCause().hasMessageContaining("the service role cannot request, change or withdraw an outbox discard");
+
+        // A backdated request is stamped with the database's time and login.
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now() - interval '1 day',"
+            + " discard_reason = 'INC-3: consumers agreed' where event_id = ?", opened);
+        assertThat(owner.queryForObject("select discard_requested_at > now() - interval '1 minute' and"
+            + " discard_requested_by = ? from " + SCHEMA + ".outbox_event where event_id = ?", Boolean.class,
+            PostgresTestDatabase.ownerUser(), opened)).isTrue();
+
+        for (String change : List.of("park_reason = 'forged'", "aggregate_id = 'forged'",
+                "event_type = 'CoreBanking.Account.Closed.v1'", "payload = '{}'::jsonb",
+                "aggregate_version = 99", "occurred_at = now() - interval '1 day'")) {
+            assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set " + change
+                + " where event_id = ?", opened)).as(change)
+                .hasMessageContaining("has a pending discard request");
+        }
+        assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set parked_at = null"
+            + " where event_id = ?", opened)).rootCause().hasMessageContaining("the service role cannot unpark");
+        // Taking another row's id: the other row cannot be deleted (never published), nor this id changed.
+        assertThatThrownBy(() -> jdbc.update("delete from " + SCHEMA + ".outbox_event where event_id = ?", otherOpened))
+            .hasMessageContaining("was never published and cannot be deleted");
+        assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set event_id = ? where event_id = ?",
+            UUID.randomUUID(), opened)).hasMessageContaining("has a pending discard request");
+        // Leaving the outbox without an audit row.
+        assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set published_at = now(),"
+            + " parked_at = null where event_id = ?", opened))
+            .hasMessageContaining("it leaves the outbox only as an audited discard");
+
+        Map<String, Object> row = owner.queryForMap("select park_reason, aggregate_id, event_type, published_at"
+            + " from " + SCHEMA + ".outbox_event where event_id = ?", opened);
+        assertThat(row).containsEntry("park_reason", "INC-3: test").containsEntry("aggregate_id", carol)
+            .containsEntry("event_type", "CoreBanking.Account.Opened.v1").containsEntry("published_at", null);
+
+        // An operator withdraws it with the replay; the trigger clears the reason and requester.
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
+            + " park_counted = false, last_error = null, discard_requested_at = null where event_id = ?", opened);
+        assertThat(owner.queryForMap("select parked_at, discard_reason, discard_requested_by from " + SCHEMA
+            + ".outbox_event where event_id = ?", opened)).containsEntry("parked_at", null)
+            .containsEntry("discard_reason", null).containsEntry("discard_requested_by", null);
+    }
+
+    /**
+     * DevSecOps on 4541ef6 (B1 residual): the audit must name the request that was carried out.
+     * A request withdrawn and made again is audited as the second one; once the audit row exists
+     * the row is already published, so the request can no longer be withdrawn or changed, and
+     * the published row cannot change at all (S-b).
+     */
+    @Test
+    void theAuditNamesTheRequestCarriedOutNotAWithdrawnOne() throws Exception {
+        String dave = open("CUST-W", "CURRENT", "k-w");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        JdbcTemplate operator = PostgresTestDatabase.operator();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, dave);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-4: test'"
+            + " where event_id = ?", opened);
+        operator.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'FIRST' where event_id = ?", opened);
+        operator.update("update " + SCHEMA + ".outbox_event set discard_requested_at = null where event_id = ?", opened);
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'SECOND by owner' where event_id = ?", opened);
+
+        // What the relay runs, here as the runtime role directly.
+        assertThat(outboxAudit(opened)).isZero();
+        jdbc.update("insert into " + SCHEMA + ".outbox_discard_audit (event_id) values (?)", opened);
+
+        assertThat(owner.queryForMap("select requested_by, discard_reason from " + SCHEMA
+            + ".outbox_discard_audit where event_id = ?", opened))
+            .containsEntry("requested_by", PostgresTestDatabase.ownerUser())
+            .containsEntry("discard_reason", "SECOND by owner");
+        assertThat(owner.queryForObject("select published_at is not null and parked_at is null from " + SCHEMA
+            + ".outbox_event where event_id = ?", Boolean.class, opened)).isTrue();
+        for (String change : List.of("discard_requested_at = null", "discard_reason = 'THIRD'")) {
+            assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set " + change
+                + " where event_id = ?", opened)).as(change).hasMessageContaining("is already published");
+        }
+        for (JdbcTemplate role : List.of(jdbc, owner)) {
+            for (String change : List.of("published_at = null", "published_at = now() + interval '1 year'",
+                    "park_reason = 'rewritten'", "parked_at = now()")) {
+                assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set " + change
+                    + " where event_id = ?", opened)).as(change).hasMessageContaining("a published row cannot change");
+            }
+        }
+    }
+
+    /** The audit insert locks the requested row: a withdrawal in flight blocks it, then wins. */
+    @Test
+    void theAuditWaitsForAWithdrawalInFlightAndThenRefuses() throws Exception {
+        String erin = open("CUST-L", "CURRENT", "k-l");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, erin);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-5: test'"
+            + " where event_id = ?", opened);
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'INC-5: agreed' where event_id = ?", opened);
+
+        try (java.sql.Connection withdrawing = PostgresTestDatabase.ownerConnection();
+             java.sql.Connection relaying = dataSource.getConnection()) {
+            withdrawing.setAutoCommit(false);
+            try (var st = withdrawing.prepareStatement("update " + SCHEMA
+                    + ".outbox_event set discard_requested_at = null where event_id = ?")) {
+                st.setObject(1, opened);
+                assertThat(st.executeUpdate()).isEqualTo(1);
+            }
+            relaying.setAutoCommit(false);
+            try (var st = relaying.createStatement()) {
+                st.execute("set local lock_timeout = '500ms'");
+            }
+            try (var st = relaying.prepareStatement("insert into " + SCHEMA + ".outbox_discard_audit (event_id) values (?)")) {
+                st.setObject(1, opened);
+                assertThatThrownBy(st::executeUpdate).hasMessageContaining("lock timeout");
+            }
+            relaying.rollback();
+            withdrawing.commit();
+        }
+        assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_discard_audit (event_id) values (?)",
+            opened)).hasMessageContaining("has no pending discard request");
+        assertThat(outboxAudit(opened)).isZero();
+    }
+
+    /** S-a: a parked row without an audited discard cannot be marked published, by any login. */
+    @Test
+    void aParkedRowLeavesTheOutboxOnlyAsAnAuditedDiscard() throws Exception {
+        String frank = open("CUST-S", "CURRENT", "k-s");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, frank);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-6: test'"
+            + " where event_id = ?", opened);
+        for (JdbcTemplate role : List.of(jdbc, owner, PostgresTestDatabase.operator())) {
+            for (String mark : List.of("published_at = now()", "published_at = now(), parked_at = null")) {
+                assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set " + mark
+                    + " where event_id = ?", opened)).as(mark)
+                    .hasMessageContaining("it leaves the outbox only as an audited discard");
+            }
+        }
+        assertThat(owner.queryForObject("select published_at is null from " + SCHEMA + ".outbox_event"
+            + " where event_id = ?", Boolean.class, opened)).isTrue();
+    }
+
+    /**
+     * DevSecOps on 8ec9013 (S-a, two statements): unparking and then publishing must not let a parked
+     * row leave the outbox unsent. The service role cannot unpark; an operator's unpark is a replay,
+     * and no login but the service role publishes.
+     */
+    @Test
+    void aParkedRowCannotBeUnparkedAndThenMarkedPublished() throws Exception {
+        String gina = open("CUST-U", "CURRENT", "k-u");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        JdbcTemplate operator = PostgresTestDatabase.operator();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, gina);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-7: test'"
+            + " where event_id = ?", opened);
+
+        assertThatThrownBy(() -> jdbc.update("update " + SCHEMA + ".outbox_event set parked_at = null"
+            + " where event_id = ?", opened)).rootCause().hasMessageContaining("the service role cannot unpark");
+
+        // The reviewer's sequence, in one transaction as a non-service login.
+        try (java.sql.Connection connection = PostgresTestDatabase.ownerConnection()) {
+            connection.setAutoCommit(false);
+            try (var st = connection.prepareStatement("update " + SCHEMA
+                    + ".outbox_event set parked_at = null where event_id = ?")) {
+                st.setObject(1, opened);
+                assertThat(st.executeUpdate()).isEqualTo(1);
+            }
+            try (var st = connection.prepareStatement("update " + SCHEMA
+                    + ".outbox_event set published_at = now() where event_id = ?")) {
+                st.setObject(1, opened);
+                assertThatThrownBy(st::executeUpdate).hasMessageContaining("only the service role publishes");
+            }
+            connection.rollback();
+        }
+
+        // An operator's replay is allowed; publishing it is still the relay's job.
+        operator.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
+            + " park_counted = false, last_error = null where event_id = ?", opened);
+        for (JdbcTemplate role : List.of(operator, owner)) {
+            assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set published_at = now()"
+                + " where event_id = ?", opened)).rootCause().hasMessageContaining("only the service role publishes");
+        }
+        assertThat(owner.queryForObject("select published_at is null and parked_at is null from " + SCHEMA
+            + ".outbox_event where event_id = ?", Boolean.class, opened)).isTrue();
+        assertThat(outboxAudit(opened)).isZero();
+    }
+
+    /** DevSecOps on 8ec9013 (S1): a request an operator holds locked is skipped, not waited for. */
+    @Test
+    @Timeout(60)
+    void theRelaySkipsADiscardAnOperatorIsChangingRightNow() throws Exception {
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        List<UUID> requested = new ArrayList<>();
+        for (String customer : List.of("CUST-H1", "CUST-H2")) {
+            String account = open(customer, "CURRENT", "k-" + customer);
+            UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+                + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, account);
+            owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-8: test'"
+                + " where event_id = ?", opened);
+            owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+                + " discard_reason = 'INC-8: agreed' where event_id = ?", opened);
+            requested.add(opened);
+        }
+        TransactionTemplate claim = new TransactionTemplate(transactionManager);
+
+        try (java.sql.Connection holding = PostgresTestDatabase.ownerConnection()) {
+            holding.setAutoCommit(false);
+            try (var st = holding.prepareStatement("update " + SCHEMA
+                    + ".outbox_event set discard_reason = 'INC-8: agreed, amended' where event_id = ?")) {
+                st.setObject(1, requested.get(0));
+                assertThat(st.executeUpdate()).isEqualTo(1);
+            }
+            // Would raise "lock timeout" if the relay waited for the operator.
+            Integer discarded = claim.execute(status -> {
+                jdbc.execute("set local lock_timeout = '2s'");
+                return outbox.auditDiscardRequests();
+            });
+            assertThat(discarded).isEqualTo(1);
+            assertThat(outboxAudit(requested.get(0))).isZero();
+            assertThat(outboxAudit(requested.get(1))).isOne();
+            holding.commit();
+        }
+        Integer later = claim.execute(status -> outbox.auditDiscardRequests());
+        assertThat(later).isEqualTo(1);
+        assertThat(owner.queryForObject("select discard_reason from " + SCHEMA + ".outbox_discard_audit"
+            + " where event_id = ?", String.class, requested.get(0))).isEqualTo("INC-8: agreed, amended");
+    }
+
+    /** DevSecOps on 8ec9013 (low): a discarded event id cannot come back after the purge. */
+    @Test
+    void aDiscardedEventIdCannotBeReused() throws Exception {
+        String hana = open("CUST-R", "CURRENT", "k-r");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, hana);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-9: test'"
+            + " where event_id = ?", opened);
+        owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'INC-9: agreed' where event_id = ?", opened);
+        jdbc.update("insert into " + SCHEMA + ".outbox_discard_audit (event_id) values (?)", opened);
+        // The purge, as the runtime role.
+        assertThat(jdbc.update("delete from " + SCHEMA + ".outbox_event where event_id = ?", opened)).isOne();
+
+        assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type,"
+            + " aggregate_id, aggregate_version, event_type, payload, correlation_id, occurred_at)"
+            + " values (?, 'Account', ?, 1, 'CoreBanking.Account.Opened.v1', '{}', 'corr', now())", opened, hana))
+            .hasMessageContaining("was discarded and cannot be reused");
+    }
+
+    private int outboxAudit(UUID eventId) {
+        return PostgresTestDatabase.owner().queryForObject("select count(*) from " + SCHEMA
+            + ".outbox_discard_audit where event_id = ?", Integer.class, eventId);
     }
 
     private String open(String customerId, String type, String key) throws Exception {

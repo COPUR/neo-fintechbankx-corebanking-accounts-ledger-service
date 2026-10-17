@@ -55,6 +55,12 @@ refuse 'image\.digest is required' --set image.digest=
 refuse 'image\.digest must be sha256:<64 lowercase hex>' --set image.digest=latest
 refuse 'image\.digest must be sha256:<64 lowercase hex>' --set image.digest=sha256:ABC
 refuse 'image\.repository must not carry a tag or digest' --set image.repository=ci/accounts-ledger-service:v1
+refuse 'image\.tag must be a label value' --set-string image.tag=release/1
+refuse 'image\.tag must be a label value' --set-string image.tag=-v1
+refuse 'image\.tag must be a label value' --set-string image.tag=$(printf 'a%.0s' {1..64})
+refuse 'image\.tag must not be latest' --set-string image.tag=Latest
+# Without a tag the labels carry the digest's first 12 hex digits.
+grep -q 'app.kubernetes.io/version: "000000000000"' <<<"$(helm template ci "$chart" $args $required --set image.tag=)"
 grep -q 'name: "rds-ca-bundle"' <<<"$rendered"
 grep -q 'mountPath: "/etc/fintechbankx/rds-ca"' <<<"$rendered"
 # cicd-templates 4f0f266: mounted at /etc/fintechbankx/rds-ca, exported as DB_SSL_ROOT_CERT,

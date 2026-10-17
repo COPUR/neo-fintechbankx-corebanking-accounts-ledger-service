@@ -60,6 +60,10 @@ import java.util.concurrent.TimeoutException;
  * Only an operator parks such a row, by hand and with a recorded park_reason
  * (docs/RUNBOOK.md, Outbox); the relay counts each such park once, under its lock,
  * as outbox.parked.events{exception="OperatorPark"} (park_counted, V2). The outage alert is outbox_oldest_pending_age_seconds.
+ * An operator discards a parked row the same way, by requesting it in SQL
+ * (discard_requested_at, V4); the relay, under its lock, writes the
+ * outbox_discard_audit row, whose triggers mark the row published without sending
+ * it, which releases the account's later rows, and counts it in outbox.discarded.events.
  */
 public class OutboxRelay {
 
@@ -73,6 +77,7 @@ public class OutboxRelay {
     static final String SEND_FAILURES = "outbox.send.failures";
     static final String PARKED_EVENTS = "outbox.parked.events";
     static final String OPERATOR_PARK = "OperatorPark";
+    static final String DISCARDED_EVENTS = "outbox.discarded.events";
     static final Duration BACKOFF_START = Duration.ofSeconds(1);
     static final Duration BACKOFF_MAX = Duration.ofMinutes(5);
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
@@ -122,6 +127,7 @@ public class OutboxRelay {
         try (RelayLock.Held held = lock.get()) {
             List<OutboxEventJpaEntity> batch = transactions.execute(status -> {
                 countOperatorParks();
+                discardRequested();
                 return outbox.findUnpublishedBatch(batchSize);
             });
             return batch == null ? 0 : send(batch);
@@ -206,6 +212,22 @@ public class OutboxRelay {
             parked.markParkCounted();
             recordParked(OPERATOR_PARK);
             log.warn("Outbox event {} ({}) was parked by an operator", parked.getEventId(), parked.getEventType());
+        }
+    }
+
+    /**
+     * Operator discards (docs/RUNBOOK.md, Outbox): one INSERT into outbox_discard_audit per
+     * requested row; the audit table's triggers lock and copy the row and mark it published
+     * (V4), so an audit row exists exactly when its discard happened. Runs in the claim
+     * transaction under the relay lock, so the batch read next already sees the account's
+     * later rows released.
+     */
+    private void discardRequested() {
+        int discarded = outbox.auditDiscardRequests();
+        if (discarded > 0) {
+            meters.counter(DISCARDED_EVENTS).increment(discarded);
+            log.warn("Outbox relay discarded {} parked event(s) at an operator's request; see outbox_discard_audit",
+                discarded);
         }
     }
 

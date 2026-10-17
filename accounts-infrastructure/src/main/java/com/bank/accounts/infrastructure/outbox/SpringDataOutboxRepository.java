@@ -43,4 +43,25 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
 
     @Query("select min(e.occurredAt) from OutboxEventJpaEntity e where e.publishedAt is null and e.parkedAt is null")
     Instant oldestPendingOccurredAt();
+
+    /**
+     * Discards every row an operator asked to discard (V4, docs/RUNBOOK.md Outbox) by writing its
+     * audit row. Only the event id is given: trg_outbox_discard_audit_derive locks the outbox row
+     * and fills every other column from it (requester and times included), and
+     * trg_outbox_discard_audit_mark then marks the row published and no longer parked, which
+     * releases the account's later rows. Returns the number of rows discarded. The relay runs it
+     * under its lock. A request an operator is changing right now (row locked) is skipped until a
+     * later run, so an open operator transaction never stalls the relay.
+     */
+    @Modifying
+    @Query(value = """
+        insert into outbox_discard_audit (event_id)
+        select o.event_id
+        from outbox_event o
+        where o.discard_requested_at is not null and o.parked_at is not null and o.published_at is null
+        order by o.created_seq
+        for update of o skip locked
+        on conflict (event_id) do nothing
+        """, nativeQuery = true)
+    int auditDiscardRequests();
 }

@@ -30,9 +30,13 @@ public class OutboxConfiguration {
         return new AccountEventEnvelopeFactory(objectMapper);
     }
 
+    /**
+     * UTC, ticking in microseconds: Postgres TIMESTAMPTZ keeps microseconds, so an instant a
+     * response returns (openedAt, bookedAt) is the one a later read returns.
+     */
     @Bean
     Clock clock() {
-        return Clock.systemUTC();
+        return Clock.tick(Clock.systemUTC(), Duration.ofNanos(1_000));
     }
 
     /**

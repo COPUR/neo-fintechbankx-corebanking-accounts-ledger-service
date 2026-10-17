@@ -48,10 +48,20 @@ guard). A tag never reaches an image line.
 {{- /*
 Value of the version and app.kubernetes.io/version labels: image.tag when set,
 else the first 12 hex digits of image.digest (a label value cannot hold ':').
+image.tag must be a Kubernetes label value (at most 63 of [A-Za-z0-9._-],
+alphanumeric at both ends) and never "latest", so the render fails here instead
+of the API server refusing the Deployment, and no label claims a moving tag.
 */ -}}
 {{- define "accounts.version" -}}
 {{- if .Values.image.tag -}}
-{{- .Values.image.tag -}}
+{{- $tag := toString .Values.image.tag -}}
+{{- if or (gt (len $tag) 63) (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$" $tag)) -}}
+{{- fail (printf "image.tag must be a label value (at most 63 characters of A-Z a-z 0-9 . _ -, alphanumeric at both ends), got %q" $tag) -}}
+{{- end -}}
+{{- if eq (lower $tag) "latest" -}}
+{{- fail "image.tag must not be latest (it only names the version labels; use the git SHA)" -}}
+{{- end -}}
+{{- $tag -}}
 {{- else if .Values.image.digest -}}
 {{- trunc 12 (trimPrefix "sha256:" .Values.image.digest) -}}
 {{- else -}}

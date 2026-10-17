@@ -364,6 +364,39 @@ class OutboxRelayTest {
         assertThat(meters.find("outbox.parked.events").counters()).isEmpty();
     }
 
+    /** Runbook discard: audited (the audit triggers mark the row) before the batch is read; counted once per row. */
+    @Test
+    void operatorDiscardsAreAuditedMarkedAndCountedBeforeTheBatchIsRead() {
+        when(outbox.auditDiscardRequests()).thenReturn(2).thenReturn(0);
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of());
+
+        relay.relayOnce();
+        relay.relayOnce();
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(outbox);
+        order.verify(outbox).auditDiscardRequests();
+        order.verify(outbox).findUnpublishedBatch(50);
+        assertThat(meters.get("outbox.discarded.events").counter().count()).isEqualTo(2.0);
+    }
+
+    @Test
+    void noDiscardHappensWithoutAnyRequest() {
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of());
+
+        relay.relayOnce();
+
+        assertThat(meters.find("outbox.discarded.events").counters()).isEmpty();
+    }
+
+    @Test
+    void discardsAreNotCarriedOutByAReplicaWithoutTheRelayLock() {
+        lockFree = false;
+
+        relay.relayOnce();
+
+        verify(outbox, never()).auditDiscardRequests();
+    }
+
     @Test
     void interruptedSendStopsTheBatch() {
         OutboxEventJpaEntity first = row("ACC-I");

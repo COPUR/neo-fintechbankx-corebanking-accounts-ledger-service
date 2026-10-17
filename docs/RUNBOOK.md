@@ -41,6 +41,7 @@ Exported only while the relay is on:
 | `outbox_parked_rows` | Rows parked right now. |
 | `outbox_send_failures_total{exception}` | Failed sends by exception class. The relay backs off from 1 s, doubling, to at most 5 min. Nothing is marked. |
 | `outbox_parked_events_total{exception}` | Parks: a payload error class, or `OperatorPark`. OutboxEventsParked fires on any increase. |
+| `outbox_discarded_events_total` | Parked rows discarded at an operator's request (audited in `outbox_discard_audit`). No platform alert yet. |
 
 ### Diagnose
 
@@ -79,7 +80,8 @@ order by created_seq;
 
 Each of these changes publication for one account. The corebanking squad decides on them, and the
 change ticket records the event id, the reason and who approved it. Never delete outbox rows by
-hand: the purge removes published rows after `accounts.outbox.retention` (7 days).
+hand: the purge removes published rows after `accounts.outbox.retention` (7 days). The database
+refuses deleting a row that was never published, for every login.
 
 ```sql
 -- Park a row the relay keeps failing on (only a payload error parks by itself, ADR-021 decision 4).
@@ -96,11 +98,71 @@ where event_id = '<event id>' and parked_at is not null;
 
 -- Discard: consumers never receive this event. Only with the consumers' squads (payments, lending)
 -- agreed in the ticket, since a missing Debited or Credited event leaves their view of the
--- balance wrong.
+-- balance wrong. This only requests it (a reason is required); the relay carries it out on its
+-- next run (below).
 update sc_acc_accounts_ledger.outbox_event
-set published_at = now(), parked_at = null,
-    park_reason = 'discarded <ticket>: ' || coalesce(park_reason, '')
-where event_id = '<event id>' and parked_at is not null;
+set discard_requested_at = now(), discard_reason = '<ticket>: <who agreed, why>'
+where event_id = '<event id>' and parked_at is not null and published_at is null;
+```
+
+On its next run, the replica that holds the relay lock carries out every requested discard in
+one transaction. It inserts the row's `sc_acc_accounts_ledger.outbox_discard_audit` row, and that
+insert is the discard: an audit row exists exactly when its discard happened.
+
+- The audit row copies the outbox row, with the requesting database login and time. Both always
+  come from the database, never from a value a statement supplies:
+  - The trigger `trg_outbox_discard_guard` stamps `session_user` and `now()` on the UPDATE that
+    requests the discard. A backdated `discard_requested_at` is overwritten.
+  - The same trigger refuses an INSERT that already carries a discard request.
+  - The same trigger refuses the service's own runtime role when it tries to request, change or
+    withdraw a discard.
+  - While a request is pending, the same trigger freezes everything the audit copies (event id,
+    aggregate, event type, payload, occurred_at, park reason) and the park itself.
+  - A parked row leaves the outbox unsent only as an audited discard, however many statements
+    try. The same trigger marks a parked row published only through its matching audit row,
+    refuses the service's runtime role unparking a row (the relay never unparks; a replay is an
+    operator's step), and refuses every login except the runtime role publishing a row. A published
+    row cannot change at all until the purge deletes it.
+  - A discarded event id cannot be inserted again after the purge.
+  - The trigger `trg_outbox_discard_audit_derive` locks the requested outbox row and fills every
+    audit column from it. It refuses an audit row for an event that has no pending request. A
+    withdrawal or a new request that is still in flight makes a direct insert wait; the audit then
+    names the request as it stands after that commit, or is refused if it was withdrawn. The relay
+    skips a request that an open transaction holds locked and takes it on a later run, so an
+    operator's open transaction never stalls the relay.
+  - The requester is therefore whoever logged in. Operators must use personal database logins, not
+    the shared owner or runtime credentials.
+
+Operator logins get only what these steps need (Platform grants them per environment):
+
+```sql
+grant usage on schema sc_acc_accounts_ledger to <operator>;
+grant select on sc_acc_accounts_ledger.outbox_event, sc_acc_accounts_ledger.outbox_discard_audit to <operator>;
+grant update (parked_at, park_reason, park_counted, last_error, discard_requested_at, discard_reason)
+    on sc_acc_accounts_ledger.outbox_event to <operator>;
+```
+
+No `published_at`, no INSERT or DELETE, nothing on the audit table but SELECT. The guard
+refuses an operator publishing a row anyway; the column grant keeps that true without it.
+- The trigger `trg_outbox_discard_audit_mark` then marks the row published without sending it and
+  clears `parked_at`, so the account's later events go out.
+- It counts the discard in `outbox_discarded_events_total` and logs a warning.
+
+The audit row stays after the outbox purge. The runtime role may only read and insert audit rows,
+never update or delete them. The audit copies the event envelope: account, holder and journal
+entry ids, amounts and balances, but no names or contact data.
+
+To withdraw a request before the relay runs, add `discard_requested_at = null` to the replay
+statement. To keep the row parked, set only `discard_requested_at = null`. The trigger clears the
+reason and the requester. While the request is pending, the replay statement alone is refused.
+Once the relay has run, the discard is done: the row is published and can no longer be withdrawn,
+changed or replayed.
+
+```sql
+-- Discards, newest first
+select event_id, aggregate_id, event_type, park_reason, discard_reason, requested_by, requested_at, discarded_at
+from sc_acc_accounts_ledger.outbox_discard_audit
+order by discarded_at desc;
 ```
 
 The account's ledger state (`account`, `journal_entry`, `posting_line`) is never changed by these

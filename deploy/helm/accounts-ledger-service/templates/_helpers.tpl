@@ -56,7 +56,7 @@ Usage: include "accounts.remoteKey" (list "externalSecret.remoteSecretName" .Val
 {{- /*
 Datasource and TLS guard (governance round 3, answer 2b; round 6 hardening
 after the reviews of PR #14). The rules are the shared chart's fbx.guard,
-vendored unchanged as _fbx_helpers.tpl (cicd-templates 6b6c317, pinned by
+vendored unchanged as _fbx_helpers.tpl (cicd-templates 73e1881, pinned by
 sha256 in the README and in the deploy/helm job). accounts.validateTls passes
 it this chart's values through an adapter dict (README "Vendoring the guard"):
 config, extraEnv, envFrom and extraEnvFrom (not rendered here, mapped so a
@@ -77,7 +77,7 @@ security.protocol, jdk.tls, java.security.properties, '@', -XX:VMOptionsFile,
 *endpoint.identification.algorithm value https; '$(' in extraEnv values;
 envFrom, extraEnvFrom and externalSecret.dataFrom; and the key shapes.
 
-accounts.guardEnv keeps only what fbx.guard does not do (cicd-templates 6b6c317
+accounts.guardEnv keeps only what fbx.guard does not do (cicd-templates 73e1881
 covers the Kafka client TLS names, spring.data.mongodb.* and kafka in JVM
 options, so the chart-local rules for those are gone):
   - JAVA_OPTS: not a JVM option name for fbx.guard. The image entrypoint does

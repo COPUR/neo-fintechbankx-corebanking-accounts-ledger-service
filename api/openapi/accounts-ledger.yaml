@@ -8,11 +8,10 @@ info:
     mandates, bulk and loan services read accounts here and post journal
     entries; nobody else stores balances.
   license:
-    name: Proprietary
-    url: https://openfinance.example.com/license
+    name: Proprietary, FinTechBankX internal use only
 servers:
-  - url: https://api.sandbox.openfinance.ae
-    description: Sandbox
+  - url: https://svc-acc-accounts-ledger.corebanking.svc.cluster.local
+    description: In-mesh address; internal callers only, no public gateway route
 
 tags:
   - name: Accounts

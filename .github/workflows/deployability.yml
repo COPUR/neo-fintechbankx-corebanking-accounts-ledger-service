@@ -37,10 +37,10 @@ jobs:
       - name: Vendored platform guard
         run: |
           # fintechbankx-platform-delivery-iac-cicd-templates
-          # charts/fintechbankx-service/templates/_helpers.tpl at 6b6c317 (header-less whole-file copy, README "Kubernetes");
+          # charts/fintechbankx-service/templates/_helpers.tpl at 73e1881 (header-less whole-file copy, README "Kubernetes");
           # scripts/ci/verify-vendored-guard.sh is the platform script at the same commit. To take a newer reference,
           # copy both again and update the digest and the commit here and in the README.
-          scripts/ci/verify-vendored-guard.sh deploy/helm/accounts-ledger-service 8ba2e4a11ead019c25bf0a01e4fe4bbabb6fef0e1980e5fa828ccb9f5673f8ba
+          scripts/ci/verify-vendored-guard.sh deploy/helm/accounts-ledger-service 4f2cdfe056f5afce0297f699c8b66cb80dc42e8e311759bf4a973f8a15b28b2d
       - name: Lint and render chart
         run: |
           chart=deploy/helm/accounts-ledger-service
@@ -130,7 +130,7 @@ jobs:
           grep -A4 'name: KAFKA_TLS_CA' <<<"$strimzi" | grep -q 'name: "fintechbankx-cluster-ca-cert"'
           # Governance round 3 (2b) and round 6 (PR #14 review 5479739685): the datasource URL is
           # only config.DB_URL, parsed the way PgJDBC reads it (templates/_fbx_helpers.tpl, vendored from
-          # cicd-templates 6b6c317, fbx.guard). Each of these must stop the render.
+          # cicd-templates 73e1881, fbx.guard). Each of these must stop the render.
           ok_url='jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
           for bad in "$ok_url&sslmode=disable" \
                      'jdbc:postgresql://ci-db:5432/db?sslrootcert=/tmp/decoy.pem&sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
@@ -376,6 +376,28 @@ jobs:
           refuse 'config.spring.data_source.url is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.data_source\.url=jdbc:h2:mem:x'
           refuse 'config.spring.data_source.driver-class-name is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.data_source\.driver-class-name=org.h2.Driver'
           refuse 'config.spring.fly_way.url is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.fly_way\.url=jdbc:h2:mem:x'
+          # --- ported from fintechbankx-service tests/schema_management_names_test.yaml (cicd-templates 73e1881):
+          # config and extraEnv cases; this chart passes no javaToolOptions and fixes its ExternalSecret keys.
+          refuse 'config\.SPRING_JPA_HIBERNATE_DDL_AUTO is not allowed: a schema-management setting' --set-string config.SPRING_JPA_HIBERNATE_DDL_AUTO=create-drop
+          refuse 'config\.spring\.jpa\.generate-ddl is not allowed: a schema-management setting' --set-string 'config.spring\.jpa\.generate-ddl=true'
+          refuse 'config\.SPRING_JPA_PROPERTIES_HIBERNATE_HBM2DDL_AUTO is not allowed: a schema-management setting' --set-string config.SPRING_JPA_PROPERTIES_HIBERNATE_HBM2DDL_AUTO=update
+          refuse 'extraEnv must not set SPRING_SQL_INIT_MODE \(value or valueFrom\): a schema-management setting' --set-json 'extraEnv=[{"name": "SPRING_SQL_INIT_MODE", "value": "always"}]'
+          refuse 'extraEnv must not set spring\.sql\.init\.schema-locations \(value or valueFrom\): a schema-management setting' --set-json 'extraEnv=[{"name": "spring.sql.init.schema-locations", "valueFrom": {"configMapKeyRef": {"name": "other", "key": "schema"}}}]'
+          refuse 'config\.SPRING_SQLINIT_MODE is not allowed: a schema-management setting' --set-string config.SPRING_SQLINIT_MODE=always
+          refuse 'config\.JAVAX_PERSISTENCE_SCHEMA_GENERATION_DATABASE_ACTION is not allowed: a schema-management setting' --set-string config.JAVAX_PERSISTENCE_SCHEMA_GENERATION_DATABASE_ACTION=drop-and-create
+          refuse 'config\.spring\.j_pa\.hibernate\.ddl-auto is not allowed: a schema-management setting' --set-string 'config.spring\.j_pa\.hibernate\.ddl-auto=create'
+          refuse 'extraEnv must not set spring\[jpa\]\.generate-ddl .*: a schema-management setting' --set-json 'extraEnv=[{"name": "spring[jpa].generate-ddl", "value": "true"}]'
+          refuse 'extraEnv must not set _SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION .*: a schema-management setting' --set-json 'extraEnv=[{"name": "_SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION", "value": "true"}]'
+          refuse 'extraEnv\.JAVA_TOOL_OPTIONS must not mention .*jakarta\.persistence' --set-json 'extraEnv=[{"name": "JAVA_TOOL_OPTIONS", "value": "-Djakarta.persistence.schema-generation.database.action=drop-and-create"}]'
+          refuse 'extraEnv\._JAVA_OPTIONS must not mention .*javax\.persistence' --set-json 'extraEnv=[{"name": "_JAVA_OPTIONS", "value": "-Djavax.persistence.schema-generation.database.action=create"}]'
+          helm template ci "$chart" $args $required --set-string config.SPRING_DATA_JPA_REPOSITORIES_BOOTSTRAP_MODE=deferred --set-string config.SPRING_JPAX_NOTE=x --set-string config.APP_HIBERNATE_STATS=off --set-string config.HIBERNATES_NOTE=x --set-json 'extraEnv=[{"name": "spring.sqlx.mode", "value": "off"}]' > /dev/null
+          # --- ported from fintechbankx-service tests/unmatched_bracket_names_test.yaml (cicd-templates 73e1881)
+          refuse 'extraEnv must not set spring\.J\]PA\.generate-ddl \(value or valueFrom\): a schema-management setting' --set-json 'extraEnv=[{"name": "spring.J]PA.generate-ddl", "value": "true"}]'
+          refuse 'extraEnv must not set -s\]pring\.sql\.init\.mode \(value or valueFrom\): a schema-management setting' --set-json 'extraEnv=[{"name": "-s]pring.sql.init.mode", "value": "always"}]'
+          refuse 'extraEnv must not set -SPRIN\]G_JPA_HIBERNATE_DDLAUTO \(value or valueFrom\): a schema-management setting' --set-json 'extraEnv=[{"name": "-SPRIN]G_JPA_HIBERNATE_DDLAUTO", "value": "create-drop"}]'
+          refuse 'extraEnv must not set S\]PRING\.profiles\.active \(value or valueFrom\): a profile can activate' --set-json 'extraEnv=[{"name": "S]PRING.profiles.active", "value": "local"}]'
+          refuse 'extraEnv\.spring\.kafka\.security\.proto\]col must be SASL_SSL or SSL' --set-json 'extraEnv=[{"name": "spring.kafka.security.proto]col", "value": "PLAINTEXT"}]'
+          helm template ci "$chart" $args $required --set-json 'extraEnv=[{"name": "spring.kafka.properties[client.id]", "value": "accounts-ledger"}]' > /dev/null
           # --- ported from scripts/ci/validate-chart.sh must_fail cases (cicd-templates 6b6c317)
           refuse 'config.DB_URL must set sslmode exactly once' --set-string 'config.DB_URL=jdbc:postgresql://db.example.internal:5432/db?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem&sslmode=require'
           refuse 'config.DB_URL must be a jdbc:' --set-string 'config.DB_URL=postgresql://db.example.internal:5432/db?sslmode=disable'

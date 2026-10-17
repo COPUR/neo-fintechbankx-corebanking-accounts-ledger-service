@@ -70,7 +70,7 @@ config:
 # Extra container env entries ({name, value} or {name, valueFrom}) for the
 # service pods. config and extraEnv go through the shared chart's datasource TLS
 # guard fbx.guard (templates/_fbx_helpers.tpl, vendored unchanged from
-# cicd-templates 6b6c317) plus this chart's additions (templates/_helpers.tpl,
+# cicd-templates 73e1881) plus this chart's additions (templates/_helpers.tpl,
 # accounts.validateTls): the render fails on any spring.datasource|flyway|
 # liquibase|r2dbc.* name (except SPRING_DATASOURCE_USERNAME and
 # SPRING_DATASOURCE_PASSWORD), spring.config.*, spring.profiles.*, spring.ssl.*,

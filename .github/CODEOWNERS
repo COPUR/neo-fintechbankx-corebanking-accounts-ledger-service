@@ -1,6 +1,6 @@
 # bounded_context: accounts_ledger
-# owning_squad: Core Banking Accounts Squad
-# owning_tribe: Core Banking Tribe
+# owning_squad: Payment Orchestration Squad
+# owning_tribe: Lending and Money Movement Tribe
 # data_owner: svc-acc-accounts-ledger (sc_acc_accounts_ledger)
 # published_events: evt.acc.account.v1 (CoreBanking.Account.{Opened,Frozen,Unfrozen,Closed,Debited,Credited}.v1)
 # consumed_events: none
@@ -9,7 +9,7 @@
 # AsyncAPI breaking-change waivers need an owner review (cicd-templates 13d09a1).
 **/*.accepted-breaking.txt @COPUR
 
-# Guardrail 4a: the vendored platform guard (cicd-templates 6b6c317), its verifier, the workflow
+# Guardrail 4a: the vendored platform guard (cicd-templates 73e1881), its verifier, the workflow
 # that pins the guard's sha256, and this file. Takes effect once code-owner review is required.
 /deploy/helm/accounts-ledger-service/templates/_fbx_helpers.tpl @COPUR
 /scripts/ci/verify-vendored-guard.sh @COPUR

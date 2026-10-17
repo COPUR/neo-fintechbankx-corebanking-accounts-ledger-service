@@ -6,8 +6,8 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-acc-accounts-ledger**
 | Alan | Değer |
 |---|---|
 | Organizasyon Modeli | Spotify Model (Tribe/Squad) |
-| Tribe | Core Banking Tribe |
-| Squad | Core Banking Accounts Squad |
+| Tribe | Lending and Money Movement Tribe |
+| Squad | Payment Orchestration Squad |
 | Repo Kümesi (Capability) | core_banking |
 | Service ID | svc-acc-accounts-ledger |
 | Bounded Context | acc (accounts ledger) |

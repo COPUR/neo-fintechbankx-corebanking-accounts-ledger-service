@@ -17,8 +17,8 @@ locals {
 
   tags = merge({
     Service            = local.service_id
-    BoundedContext     = "accounts"
-    OwningSquad        = "core-banking-accounts"
+    BoundedContext     = "core_banking"
+    OwningSquad        = "corebanking"
     Environment        = var.environment
     DataClassification = "confidential"
     ManagedBy          = "terraform"

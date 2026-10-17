@@ -9,7 +9,7 @@ info:
   description: 'Event contract for svc-acc-accounts-ledger (repository neo-fintechbankx-corebanking-accounts-ledger-service).
 
 
-    Status: Proposed. Owner: Core Banking Accounts Squad, Core Banking Tribe. Event namespace: `evt.acc.account`. This file
+    Status: Proposed. Owner: Payment Orchestration Squad, Lending and Money Movement Tribe. Event namespace: `evt.acc.account`. This file
     in the provider repository is the source; the catalog copy (fintechbankx-governance-api-contracts-asyncapi-catalog)
     follows in a catalog PR.
 
@@ -39,7 +39,7 @@ info:
   - name: evt.acc.account
   x-service-id: svc-acc-accounts-ledger
   x-event-namespace: evt.acc.account
-  x-owning-squad: Core Banking Accounts Squad
+  x-owning-squad: Payment Orchestration Squad
 defaultContentType: application/json
 servers:
   msk:

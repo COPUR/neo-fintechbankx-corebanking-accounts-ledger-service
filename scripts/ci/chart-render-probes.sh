@@ -7,11 +7,13 @@
 set -e
 : "${GITHUB_SHA:?GITHUB_SHA must be set (the runner sets it)}"
 # The selector, scope and naming checks need PyYAML. The fbx-ci VM's Ubuntu Python refuses
-# pip install --user (PEP 668, externally managed), so a missing PyYAML goes into a venv of its own.
+# pip install --user (PEP 668, externally managed), so a missing PyYAML goes into a venv of its own,
+# from hash-pinned wheels only (scripts/ci/chart-probes-requirements.txt).
+: "${RUNNER_TEMP:?RUNNER_TEMP must be set (the runner sets it; export a scratch directory to run this locally)}"
 if ! python3 -c "import yaml" 2>/dev/null; then
-  venv="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fbx-chart-probes-venv"
+  venv="$RUNNER_TEMP/fbx-chart-probes-venv"
   python3 -m venv "$venv"
-  "$venv/bin/python" -m pip install --quiet pyyaml==6.0.2
+  "$venv/bin/python" -m pip install --quiet --require-hashes --only-binary=:all: -r scripts/ci/chart-probes-requirements.txt
   export PATH="$venv/bin:$PATH"
 fi
 chart=deploy/helm/accounts-ledger-service

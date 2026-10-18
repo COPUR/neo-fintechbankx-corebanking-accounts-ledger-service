@@ -27,6 +27,46 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
         """, nativeQuery = true)
     List<OutboxEventJpaEntity> findUnpublishedBatch(@Param("batchSize") int batchSize);
 
+    /**
+     * The relay's published mark, after the send: only while the row is still unparked. An
+     * operator may park the row while the relay is sending it; then nothing is marked (0) and the
+     * relay notes it on the row instead. Never a merge of the whole row read before the send.
+     */
+    @Modifying
+    @Query(value = """
+        update outbox_event set published_at = :at, attempts = attempts + 1, last_error = null
+        where event_id = :id and published_at is null and parked_at is null
+        """, nativeQuery = true)
+    int markPublished(@Param("id") UUID eventId, @Param("at") Instant at);
+
+    /** A payload error parks the row, unless an operator parked it first (0). */
+    @Modifying
+    @Query(value = """
+        update outbox_event
+        set attempts = attempts + 1, last_error = :error, parked_at = :at, park_reason = :reason, park_counted = true
+        where event_id = :id and published_at is null and parked_at is null
+        """, nativeQuery = true)
+    int markParked(@Param("id") UUID eventId, @Param("at") Instant at, @Param("error") String error,
+                   @Param("reason") String reason);
+
+    /**
+     * Records on a row an operator parked during its send that Kafka has it ("sent while parked"):
+     * the database then refuses discarding it (V5), and the runbook replays it instead.
+     */
+    @Modifying
+    @Query(value = """
+        update outbox_event set attempts = attempts + 1, last_error = :note
+        where event_id = :id and published_at is null
+        """, nativeQuery = true)
+    int noteSentWhileParked(@Param("id") UUID eventId, @Param("note") String note);
+
+    /** When the oldest discard request still waiting for the relay was made (null if none). */
+    @Query(value = """
+        select min(discard_requested_at) from outbox_event
+        where discard_requested_at is not null and published_at is null
+        """, nativeQuery = true)
+    Instant oldestPendingDiscardRequestedAt();
+
     @Modifying
     @Query("delete from OutboxEventJpaEntity e where e.publishedAt < :before")
     int deletePublishedBefore(@Param("before") Instant before);
@@ -59,6 +99,7 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
         select o.event_id
         from outbox_event o
         where o.discard_requested_at is not null and o.parked_at is not null and o.published_at is null
+          and (o.last_error is null or o.last_error not like 'sent while parked%')
         order by o.created_seq
         for update of o skip locked
         on conflict (event_id) do nothing

@@ -80,6 +80,15 @@ public class OutboxConfiguration {
                 .description("Age of the oldest account event waiting for the relay")
                 .baseUnit("seconds")
                 .register(registry);
+            // A discard request waits only for the relay's next run; a growing age means a session
+            // holds its row locked (the relay skips locked rows) or the relay is not running.
+            Gauge.builder("outbox.discard.pending.age.seconds", outbox, repository -> {
+                    Instant oldest = repository.oldestPendingDiscardRequestedAt();
+                    return oldest == null ? 0 : Math.max(0, Duration.between(oldest, clock.instant()).toSeconds());
+                })
+                .description("Age of the oldest operator discard request the relay has not carried out")
+                .baseUnit("seconds")
+                .register(registry);
             return new OutboxMetrics();
         }
     }

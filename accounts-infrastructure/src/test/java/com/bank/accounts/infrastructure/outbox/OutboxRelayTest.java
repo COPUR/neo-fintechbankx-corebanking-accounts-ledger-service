@@ -11,6 +11,7 @@ import org.apache.kafka.common.errors.SaslAuthenticationException;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -65,6 +66,14 @@ class OutboxRelayTest {
     private final OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions, lock,
         Clock.fixed(NOW, ZoneOffset.UTC), 50, Duration.ofSeconds(1), Duration.ofDays(7), meters);
 
+    /** Each mark finds its row still unparked unless a test says an operator parked it meanwhile. */
+    @BeforeEach
+    void marksFindTheirRow() {
+        when(outbox.markPublished(any(), any())).thenReturn(1);
+        when(outbox.markParked(any(), any(), any(), any())).thenReturn(1);
+        when(outbox.noteSentWhileParked(any(), any())).thenReturn(1);
+    }
+
     @Test
     void anotherReplicaHoldingTheLockMeansNothingIsSent() {
         lockFree = false;
@@ -116,9 +125,13 @@ class OutboxRelayTest {
                 : CompletableFuture.completedFuture((SendResult<String, String>) null);
         });
         List<Boolean> openDuringSave = new java.util.ArrayList<>();
-        when(outbox.save(any(OutboxEventJpaEntity.class))).thenAnswer(invocation -> {
+        when(outbox.markPublished(any(), any())).thenAnswer(invocation -> {
             openDuringSave.add(inTransaction());
-            return invocation.getArgument(0);
+            return 1;
+        });
+        when(outbox.markParked(any(), any(), any(), any())).thenAnswer(invocation -> {
+            openDuringSave.add(inTransaction());
+            return 1;
         });
 
         assertThat(relay.relayOnce()).isEqualTo(1);
@@ -128,6 +141,36 @@ class OutboxRelayTest {
         assertThat(transactionLog).containsExactly("begin", "commit", "begin", "commit", "begin", "commit");
         assertThat(first.getPublishedAt()).isEqualTo(NOW);
         assertThat(poison.getParkedAt()).isEqualTo(NOW);
+        verify(outbox).markPublished(first.getEventId(), NOW);
+        verify(outbox).markParked(org.mockito.ArgumentMatchers.eq(poison.getEventId()),
+            org.mockito.ArgumentMatchers.eq(NOW), any(), org.mockito.ArgumentMatchers.startsWith("payload error: "));
+        verify(outbox, never()).save(any(OutboxEventJpaEntity.class));
+    }
+
+    /**
+     * DevSecOps on ac7b25c: an operator parks a row while the relay is sending it. The mark finds
+     * the row parked and changes nothing; the relay notes "sent while parked" on it (so the
+     * database refuses discarding a delivered event), counts it, and holds the account's later
+     * rows like any parked row.
+     */
+    @Test
+    void aRowParkedDuringItsSendIsNotedAsSentNotMarkedPublished() {
+        OutboxEventJpaEntity parkedMeanwhile = row("ACC-P");
+        OutboxEventJpaEntity later = row("ACC-P");
+        OutboxEventJpaEntity other = row("ACC-Q");
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(parkedMeanwhile, later, other));
+        when(kafka.send(any(ProducerRecord.class)))
+            .thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
+        when(outbox.markPublished(parkedMeanwhile.getEventId(), NOW)).thenReturn(0);
+
+        assertThat(relay.relayOnce()).isEqualTo(2);
+
+        verify(outbox).noteSentWhileParked(org.mockito.ArgumentMatchers.eq(parkedMeanwhile.getEventId()),
+            org.mockito.ArgumentMatchers.startsWith("sent while parked: delivered to Kafka at " + NOW));
+        verify(outbox, never()).markPublished(later.getEventId(), NOW);
+        verify(outbox).markPublished(other.getEventId(), NOW);
+        verify(kafka, times(2)).send(any(ProducerRecord.class));
+        assertThat(meters.counter(OutboxRelay.SENT_WHILE_PARKED).count()).isEqualTo(1.0);
     }
 
     /** ADR-019 (owner decision 2026-10-08): one topic per aggregate, key = aggregateId, eventType/eventId/correlationId headers. */

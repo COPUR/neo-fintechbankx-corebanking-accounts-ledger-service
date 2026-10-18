@@ -78,6 +78,8 @@ public class OutboxRelay {
     static final String PARKED_EVENTS = "outbox.parked.events";
     static final String OPERATOR_PARK = "OperatorPark";
     static final String DISCARDED_EVENTS = "outbox.discarded.events";
+    static final String SENT_WHILE_PARKED = "outbox.sent.while.parked";
+    static final String SENT_WHILE_PARKED_NOTE = "sent while parked";
     static final Duration BACKOFF_START = Duration.ofSeconds(1);
     static final Duration BACKOFF_MAX = Duration.ofMinutes(5);
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
@@ -151,10 +153,13 @@ public class OutboxRelay {
                 if (isPayloadError(e)) {
                     String reason = describe(e);
                     Instant parkedAt = clock.instant();
-                    save(row, () -> {
-                        row.markFailed(reason);
-                        row.park(parkedAt, "payload error: " + reason);
-                    });
+                    row.markFailed(reason);
+                    row.park(parkedAt, "payload error: " + reason);
+                    if (update(() -> outbox.markParked(row.getEventId(), parkedAt, row.getLastError(),
+                            row.getParkReason())) == 0) {
+                        log.warn("Outbox relay could not park event {} for a payload error: an operator parked it first",
+                            row.getEventId());
+                    }
                     recordParked(unwrap(e).getClass().getSimpleName());
                     blockedAggregates.add(row.getAggregateId());
                     log.error("Outbox relay parked event {} ({}): payload error {}; its account's later events wait"
@@ -166,7 +171,12 @@ public class OutboxRelay {
                 return sent;
             }
             Instant publishedAt = clock.instant();
-            save(row, () -> row.markPublished(publishedAt));
+            row.markPublished(publishedAt);
+            if (update(() -> outbox.markPublished(row.getEventId(), publishedAt)) == 0) {
+                // An operator parked it during the send: Kafka has it, the row says otherwise.
+                sentWhileParked(row, publishedAt);
+                blockedAggregates.add(row.getAggregateId());
+            }
             sent++;
         }
         failureStreak = 0;
@@ -174,11 +184,24 @@ public class OutboxRelay {
         return sent;
     }
 
-    private void save(OutboxEventJpaEntity row, Runnable change) {
-        transactions.executeWithoutResult(status -> {
-            change.run();
-            outbox.save(row);
-        });
+    /** One conditional UPDATE in its own transaction; returns the rows it changed. */
+    private int update(java.util.function.IntSupplier statement) {
+        Integer changed = transactions.execute(status -> statement.getAsInt());
+        return changed == null ? 0 : changed;
+    }
+
+    /**
+     * The row stays parked and unpublished, so it is noted ("sent while parked") instead: the
+     * database then refuses discarding it, and the runbook replays it (consumers de-duplicate on
+     * eventId). Counted in outbox_sent_while_parked_total.
+     */
+    private void sentWhileParked(OutboxEventJpaEntity row, Instant sentAt) {
+        String note = SENT_WHILE_PARKED_NOTE + ": delivered to Kafka at " + sentAt + "; replay it, do not discard it";
+        int noted = update(() -> outbox.noteSentWhileParked(row.getEventId(), note));
+        meters.counter(SENT_WHILE_PARKED).increment();
+        log.error("Outbox relay sent event {} ({}) while an operator parked it; {} (docs/RUNBOOK.md, Outbox)",
+            row.getEventId(), row.getEventType(),
+            noted == 1 ? "noted in last_error; replay it, do not discard it" : "the row was discarded meanwhile");
     }
 
     /** ADR-021 decision 4 payload errors: the record itself can never be sent. */

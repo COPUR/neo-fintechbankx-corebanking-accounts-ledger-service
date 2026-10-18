@@ -34,6 +34,7 @@ class OutboxMetricsRegistrationTest {
                 assertThat(registry.find("outbox.pending.events").gauge()).isNull();
                 assertThat(registry.find("outbox.parked.rows").gauge()).isNull();
                 assertThat(registry.find("outbox.oldest.pending.age.seconds").gauge()).isNull();
+                assertThat(registry.find("outbox.discard.pending.age.seconds").gauge()).isNull();
             });
     }
 
@@ -47,6 +48,7 @@ class OutboxMetricsRegistrationTest {
                 assertThat(registry.find("outbox.pending.events").gauge()).isNotNull();
                 assertThat(registry.find("outbox.parked.rows").gauge()).isNotNull();
                 assertThat(registry.find("outbox.oldest.pending.age.seconds").gauge()).isNotNull();
+                assertThat(registry.find("outbox.discard.pending.age.seconds").gauge()).isNotNull();
             });
     }
 

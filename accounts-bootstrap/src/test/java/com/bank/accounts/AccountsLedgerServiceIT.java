@@ -776,7 +776,7 @@ class AccountsLedgerServiceIT {
             assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type,"
                 + " aggregate_id, aggregate_version, event_type, payload, correlation_id, occurred_at)"
                 + " values (?, 'Account', ?, 1, 'CoreBanking.Account.Opened.v1', '{}', 'corr', now())", eventId, lale))
-                .hasMessageContaining("was already sent to Kafka and cannot be reused");
+                .satisfies(sqlState("23505")).hasMessageContaining("was already sent to Kafka and cannot be reused");
         }
         // The service role can neither forge, pre-empt nor remove a tombstone.
         UUID unsent = UUID.randomUUID();
@@ -785,7 +785,7 @@ class AccountsLedgerServiceIT {
                 "delete from " + SCHEMA + ".outbox_event_tombstone where event_id = '" + sentNormally + "'",
                 "update " + SCHEMA + ".outbox_event_tombstone set event_id = gen_random_uuid()"
                     + " where event_id = '" + sentNormally + "'")) {
-            assertThatThrownBy(() -> jdbc.update(change)).as(change).rootCause().hasMessageContaining("permission denied");
+            assertThatThrownBy(() -> jdbc.update(change)).as(change).satisfies(sqlState("42501"));
         }
         // SF1: the column comment says what V7 made true.
         assertThat(owner.queryForObject("select col_description('" + SCHEMA + ".outbox_event'::regclass,"
@@ -821,11 +821,26 @@ class AccountsLedgerServiceIT {
                 .execute(status -> outbox.markSent(opened, Instant.now()));
             assertThat(marked).isOne();
 
+            // 23505 either way: the tombstone check when the delete runs first, the primary key when
+            // the planner happens to feed the insert first (the row is still there). The message
+            // depends on that order, so the test pins only the SQLSTATE and the outcome.
             assertThatThrownBy(() -> jdbc.update(attempt.getValue(), opened)).as(attempt.getKey())
-                .hasMessageContaining("was already sent to Kafka and cannot be reused");
+                .satisfies(sqlState("23505"));
             assertThat(owner.queryForObject("select published_at is not null from " + SCHEMA
                 + ".outbox_event where event_id = ?", Boolean.class, opened)).as(attempt.getKey()).isTrue();
         }
+    }
+
+    /** The SQLSTATE of the first SQLException in the cause chain, so a test does not hang on message text. */
+    private static java.util.function.Consumer<Throwable> sqlState(String expected) {
+        return thrown -> {
+            Throwable cause = thrown;
+            while (cause != null && !(cause instanceof java.sql.SQLException)) {
+                cause = cause.getCause();
+            }
+            assertThat(cause).as("an SQLException in the cause chain of %s", thrown).isNotNull();
+            assertThat(((java.sql.SQLException) cause).getSQLState()).isEqualTo(expected);
+        };
     }
 
     private String tombstone(UUID eventId) {

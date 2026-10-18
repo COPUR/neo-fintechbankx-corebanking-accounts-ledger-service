@@ -143,7 +143,9 @@ insert is the discard: an audit row exists exactly when its discard happened.
     says why: `SENT_WHILE_PARKED` (written when the relay records `sent_while_parked_at`), `PURGED`
     (the purge deleted a row the relay sent) or `PURGED_DISCARDED` (the purge deleted a discarded
     row, never sent). The table is never purged. Its triggers run as the schema owner; the runtime
-    role may only read it.
+    role may only read it. The guarantee starts when V8 is installed: V8 copies in the ids still
+    recorded as sent while parked, but an id the purge deleted before V8 has no tombstone. The
+    service was not deployed anywhere before V8, so no environment holds such ids.
   - The trigger `trg_outbox_discard_audit_derive` locks the requested outbox row and fills every
     audit column from it. It refuses an audit row for an event that has no pending request. A
     withdrawal or a new request that is still in flight makes a direct insert wait; the audit then

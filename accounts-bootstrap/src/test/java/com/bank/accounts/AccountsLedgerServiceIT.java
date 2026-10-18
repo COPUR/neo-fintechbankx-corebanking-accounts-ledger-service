@@ -521,7 +521,10 @@ class AccountsLedgerServiceIT {
             + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, frank);
         owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-6: test'"
             + " where event_id = ?", opened);
-        for (JdbcTemplate role : List.of(jdbc, owner, PostgresTestDatabase.operator())) {
+        // The runbook's operator grant has no published_at; the wide operator login shows the guard alone.
+        assertThatThrownBy(() -> PostgresTestDatabase.operator().update("update " + SCHEMA + ".outbox_event"
+            + " set published_at = now() where event_id = ?", opened)).rootCause().hasMessageContaining("permission denied");
+        for (JdbcTemplate role : List.of(jdbc, owner, PostgresTestDatabase.operatorWide())) {
             for (String mark : List.of("published_at = now()", "published_at = now(), parked_at = null")) {
                 assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set " + mark
                     + " where event_id = ?", opened)).as(mark)
@@ -569,7 +572,9 @@ class AccountsLedgerServiceIT {
         // An operator's replay is allowed; publishing it is still the relay's job.
         operator.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
             + " park_counted = false, last_error = null where event_id = ?", opened);
-        for (JdbcTemplate role : List.of(operator, owner)) {
+        assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set published_at = now()"
+            + " where event_id = ?", opened)).rootCause().hasMessageContaining("permission denied");
+        for (JdbcTemplate role : List.of(PostgresTestDatabase.operatorWide(), owner)) {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set published_at = now()"
                 + " where event_id = ?", opened)).rootCause().hasMessageContaining("only the service role publishes");
         }
@@ -633,6 +638,7 @@ class AccountsLedgerServiceIT {
         jdbc.update("insert into " + SCHEMA + ".outbox_discard_audit (event_id) values (?)", opened);
         // The purge, as the runtime role.
         assertThat(jdbc.update("delete from " + SCHEMA + ".outbox_event where event_id = ?", opened)).isOne();
+        assertThat(tombstone(opened)).isEqualTo("PURGED_DISCARDED");
 
         assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type,"
             + " aggregate_id, aggregate_version, event_type, payload, correlation_id, occurred_at)"
@@ -688,18 +694,22 @@ class AccountsLedgerServiceIT {
         assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
             + " discard_reason = 'INC-10: discard' where event_id = ?", opened))
             .hasMessageContaining("was already sent to Kafka; replay it instead of discarding it");
-        for (JdbcTemplate role : List.of(jdbc, owner, operator)) {
+        // The runbook's operator grant has no sent_while_parked_at; the wide login shows the guard alone.
+        JdbcTemplate wide = PostgresTestDatabase.operatorWide();
+        assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = null"
+            + " where event_id = ?", opened)).rootCause().hasMessageContaining("permission denied");
+        for (JdbcTemplate role : List.of(jdbc, owner, wide)) {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = null"
                 + " where event_id = ?", opened)).hasMessageContaining("is write-once");
         }
         // Only the relay records a send: no other login can forge it on a parked row.
         UUID parked = otherParkedRow(owner);
-        for (JdbcTemplate role : List.of(owner, operator)) {
+        for (JdbcTemplate role : List.of(owner, wide)) {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = now()"
                 + " where event_id = ?", parked)).rootCause().hasMessageContaining("is set only by the relay");
         }
         // Not even inside a replay (the reviewer's attack on 21a239d, step 1).
-        assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set parked_at = null,"
+        assertThatThrownBy(() -> wide.update("update " + SCHEMA + ".outbox_event set parked_at = null,"
             + " park_reason = null, sent_while_parked_at = null where event_id = ?", opened))
             .hasMessageContaining("is write-once");
 
@@ -721,6 +731,107 @@ class AccountsLedgerServiceIT {
             Boolean.class, opened)).isTrue();
         assertThat(sentIds).filteredOn(opened.toString()::equals).hasSize(2);
         assertThat(outboxAudit(opened)).isZero();
+    }
+
+    /**
+     * DevSecOps on bb0728b and 3459ced: the purge deletes published rows, but every id that may be in
+     * Kafka keeps a tombstone (when the relay records a send while parked, and when the purge deletes
+     * a published row), so the service role cannot insert it again, park it and have it discarded.
+     * The tombstone is written by the schema owner's trigger; the service role can only read it.
+     */
+    @Test
+    void aDeliveredEventIdCannotComeBackAfterThePurge() throws Exception {
+        String lale = open("CUST-L", "CURRENT", "k-l");
+        String mert = open("CUST-M2", "CURRENT", "k-m2");
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        JdbcTemplate operator = PostgresTestDatabase.operator();
+        String openedOf = "select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'";
+        UUID parkedDuringSend = owner.queryForObject(openedOf, UUID.class, lale);
+        UUID sentNormally = owner.queryForObject(openedOf, UUID.class, mert);
+        operator.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-13: test'"
+            + " where event_id = ?", parkedDuringSend);
+        TransactionTemplate claim = new TransactionTemplate(transactionManager);
+        Integer marked = claim.execute(status -> outbox.markSent(parkedDuringSend, Instant.now()));
+        assertThat(marked).isOne();
+        assertThat(owner.queryForObject("select count(*) from " + SCHEMA + ".outbox_event_tombstone t join "
+            + SCHEMA + ".outbox_event o using (event_id) where event_id = ? and t.recorded_at = o.sent_while_parked_at"
+            + " and t.cause = 'SENT_WHILE_PARKED'", Integer.class, parkedDuringSend)).isOne();
+
+        operator.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
+            + " park_counted = false, last_error = null where event_id = ?", parkedDuringSend);
+        for (UUID eventId : List.of(parkedDuringSend, sentNormally)) {
+            marked = claim.execute(status -> outbox.markSent(eventId, Instant.now()));
+            assertThat(marked).isOne();
+        }
+        assertThat(tombstone(sentNormally)).isNull();
+        // The purge, as the runtime role.
+        for (UUID eventId : List.of(parkedDuringSend, sentNormally)) {
+            assertThat(jdbc.update("delete from " + SCHEMA + ".outbox_event where event_id = ?", eventId)).isOne();
+        }
+        assertThat(tombstone(parkedDuringSend)).isEqualTo("SENT_WHILE_PARKED");
+        assertThat(tombstone(sentNormally)).isEqualTo("PURGED");
+
+        for (UUID eventId : List.of(parkedDuringSend, sentNormally)) {
+            assertThatThrownBy(() -> jdbc.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type,"
+                + " aggregate_id, aggregate_version, event_type, payload, correlation_id, occurred_at)"
+                + " values (?, 'Account', ?, 1, 'CoreBanking.Account.Opened.v1', '{}', 'corr', now())", eventId, lale))
+                .hasMessageContaining("was already sent to Kafka and cannot be reused");
+        }
+        // The service role can neither forge, pre-empt nor remove a tombstone.
+        UUID unsent = UUID.randomUUID();
+        for (String change : List.of(
+                "insert into " + SCHEMA + ".outbox_event_tombstone values ('" + unsent + "', now(), 'PURGED')",
+                "delete from " + SCHEMA + ".outbox_event_tombstone where event_id = '" + sentNormally + "'",
+                "update " + SCHEMA + ".outbox_event_tombstone set event_id = gen_random_uuid()"
+                    + " where event_id = '" + sentNormally + "'")) {
+            assertThatThrownBy(() -> jdbc.update(change)).as(change).rootCause().hasMessageContaining("permission denied");
+        }
+        // SF1: the column comment says what V7 made true.
+        assertThat(owner.queryForObject("select col_description('" + SCHEMA + ".outbox_event'::regclass,"
+            + " (select attnum from pg_attribute where attrelid = '" + SCHEMA + ".outbox_event'::regclass"
+            + " and attname = 'sent_while_parked_at'))", String.class)).contains("write-once, never cleared");
+    }
+
+    /**
+     * DevSecOps on cc87121 (B1): deleting a sent row and inserting its id again in one statement
+     * (a writable CTE, or MERGE) must not bring the id back unpublished. The tombstone is written
+     * before the row goes, so the insert later in the same statement finds it.
+     */
+    @Test
+    void aSentEventIdCannotComeBackInTheStatementThatDeletesIt() throws Exception {
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        String columns = "event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload,"
+            + " correlation_id, occurred_at";
+        Map<String, String> attempts = Map.of(
+            "CUST-B1", "with d as (delete from " + SCHEMA + ".outbox_event where event_id = ? and published_at"
+                + " is not null returning " + columns + ") insert into " + SCHEMA + ".outbox_event (" + columns
+                + ") select " + columns + " from d",
+            "CUST-B2", "merge into " + SCHEMA + ".outbox_event o using (select o2.*, s.n from " + SCHEMA
+                + ".outbox_event o2 cross join (values (1), (2)) s(n) where o2.event_id = ?) x"
+                + " on o.event_id = x.event_id and x.n = 1"
+                + " when matched then delete"
+                + " when not matched then insert (" + columns + ") values (x.event_id, x.aggregate_type,"
+                + " x.aggregate_id, x.aggregate_version, x.event_type, x.payload, x.correlation_id, x.occurred_at)");
+        for (Map.Entry<String, String> attempt : attempts.entrySet()) {
+            String account = open(attempt.getKey(), "CURRENT", "k-" + attempt.getKey());
+            UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+                + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, account);
+            Integer marked = new TransactionTemplate(transactionManager)
+                .execute(status -> outbox.markSent(opened, Instant.now()));
+            assertThat(marked).isOne();
+
+            assertThatThrownBy(() -> jdbc.update(attempt.getValue(), opened)).as(attempt.getKey())
+                .hasMessageContaining("was already sent to Kafka and cannot be reused");
+            assertThat(owner.queryForObject("select published_at is not null from " + SCHEMA
+                + ".outbox_event where event_id = ?", Boolean.class, opened)).as(attempt.getKey()).isTrue();
+        }
+    }
+
+    private String tombstone(UUID eventId) {
+        List<String> causes = PostgresTestDatabase.owner().queryForList("select cause from " + SCHEMA
+            + ".outbox_event_tombstone where event_id = ?", String.class, eventId);
+        return causes.isEmpty() ? null : causes.get(0);
     }
 
     /** DevSecOps on ac7b25c (should-fix 1): a request made before the note never becomes a discard. */
@@ -757,7 +868,10 @@ class AccountsLedgerServiceIT {
         JdbcTemplate owner = PostgresTestDatabase.owner();
         UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
             + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, kemal);
-        for (JdbcTemplate role : List.of(jdbc, owner, PostgresTestDatabase.operator())) {
+        assertThatThrownBy(() -> PostgresTestDatabase.operator().update("update " + SCHEMA + ".outbox_event"
+            + " set event_id = ? where event_id = ?", UUID.randomUUID(), opened))
+            .rootCause().hasMessageContaining("permission denied");
+        for (JdbcTemplate role : List.of(jdbc, owner, PostgresTestDatabase.operatorWide())) {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set event_id = ? where event_id = ?",
                 UUID.randomUUID(), opened)).hasMessageContaining("the event id cannot change");
         }

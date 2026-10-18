@@ -90,13 +90,36 @@ final class PostgresTestDatabase {
     /** A login that is neither owner nor runtime role, like an operator's personal login. */
     static final String OPERATOR_ROLE = "accounts_operator_it";
 
+    /** Like the operator, but with table-wide UPDATE: shows the guard holds without the column grant. */
+    static final String OPERATOR_WIDE_ROLE = "accounts_operator_wide_it";
+
     /**
-     * An operator's personal login: may read the outbox and update it (park, replay, request a
-     * discard), nothing else. Created and granted on first use, after Flyway built the schema.
-     * UPDATE is table-wide here, wider than the runbook's column grant, so the ITs show the guard
-     * trigger holds on its own.
+     * An operator's personal login with the runbook's grant (docs/RUNBOOK.md): read the outbox and
+     * its audit, update only the park, replay and discard-request columns. Created and granted on
+     * first use, after Flyway built the schema.
      */
     static synchronized JdbcTemplate operator() {
+        JdbcTemplate owner = operatorLogin(OPERATOR_ROLE);
+        owner.execute("revoke update on sc_acc_accounts_ledger.outbox_event from " + OPERATOR_ROLE);
+        owner.execute("grant select on sc_acc_accounts_ledger.outbox_event, sc_acc_accounts_ledger.outbox_discard_audit to "
+            + OPERATOR_ROLE);
+        owner.execute("grant update (parked_at, park_reason, park_counted, last_error, discard_requested_at, discard_reason)"
+            + " on sc_acc_accounts_ledger.outbox_event to " + OPERATOR_ROLE);
+        return new JdbcTemplate(new DriverManagerDataSource(url, OPERATOR_ROLE, RUNTIME_PASSWORD));
+    }
+
+    /**
+     * An operator login with table-wide UPDATE on the outbox, wider than the runbook's grant, for
+     * the ITs that show the guard trigger alone refuses what the column grant would already stop.
+     */
+    static synchronized JdbcTemplate operatorWide() {
+        JdbcTemplate owner = operatorLogin(OPERATOR_WIDE_ROLE);
+        owner.execute("grant select, update on sc_acc_accounts_ledger.outbox_event to " + OPERATOR_WIDE_ROLE);
+        owner.execute("grant select on sc_acc_accounts_ledger.outbox_discard_audit to " + OPERATOR_WIDE_ROLE);
+        return new JdbcTemplate(new DriverManagerDataSource(url, OPERATOR_WIDE_ROLE, RUNTIME_PASSWORD));
+    }
+
+    private static JdbcTemplate operatorLogin(String role) {
         JdbcTemplate owner = owner();
         owner.execute("""
             do $$
@@ -105,11 +128,9 @@ final class PostgresTestDatabase {
                     create role %1$s login password '%2$s';
                 end if;
             end $$
-            """.formatted(OPERATOR_ROLE, RUNTIME_PASSWORD));
-        owner.execute("grant usage on schema sc_acc_accounts_ledger to " + OPERATOR_ROLE);
-        owner.execute("grant select, update on sc_acc_accounts_ledger.outbox_event to " + OPERATOR_ROLE);
-        owner.execute("grant select on sc_acc_accounts_ledger.outbox_discard_audit to " + OPERATOR_ROLE);
-        return new JdbcTemplate(new DriverManagerDataSource(url, OPERATOR_ROLE, RUNTIME_PASSWORD));
+            """.formatted(role, RUNTIME_PASSWORD));
+        owner.execute("grant usage on schema sc_acc_accounts_ledger to " + role);
+        return owner;
     }
 
     /** A raw connection as the schema owner, for tests that hold a transaction open. */

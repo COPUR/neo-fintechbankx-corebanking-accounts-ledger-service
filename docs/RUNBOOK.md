@@ -138,6 +138,12 @@ insert is the discard: an audit row exists exactly when its discard happened.
   - A discard cannot be requested, or carried out, for a row with `sent_while_parked_at` set. Only
     the runtime role sets it (in the relay's mark, on a parked row); it is write-once, so a replay
     followed by a new park still cannot be discarded.
+  - Every event id that was used keeps a row in `outbox_event_tombstone` (V8), and an outbox row
+    with such an id cannot be inserted again, not even in the statement that deletes it. The cause
+    says why: `SENT_WHILE_PARKED` (written when the relay records `sent_while_parked_at`), `PURGED`
+    (the purge deleted a row the relay sent) or `PURGED_DISCARDED` (the purge deleted a discarded
+    row, never sent). The table is never purged. Its triggers run as the schema owner; the runtime
+    role may only read it.
   - The trigger `trg_outbox_discard_audit_derive` locks the requested outbox row and fills every
     audit column from it. It refuses an audit row for an event that has no pending request. A
     withdrawal or a new request that is still in flight makes a direct insert wait; the audit then
@@ -158,7 +164,7 @@ grant update (parked_at, park_reason, park_counted, last_error, discard_requeste
 
 No `published_at` or `sent_while_parked_at`, no INSERT or DELETE, nothing on the audit table but
 SELECT. The guard refuses an operator publishing a row or writing `sent_while_parked_at` anyway;
-the column grant keeps that true without it.
+the column grant keeps that true without it. Operators need nothing on `outbox_event_tombstone`.
 - The trigger `trg_outbox_discard_audit_mark` then marks the row published without sending it and
   clears `parked_at`, so the account's later events go out.
 - It counts the discard in `outbox_discarded_events_total` and logs a warning.

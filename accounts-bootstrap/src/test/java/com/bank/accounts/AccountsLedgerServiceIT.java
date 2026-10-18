@@ -641,10 +641,10 @@ class AccountsLedgerServiceIT {
     }
 
     /**
-     * DevSecOps on ac7b25c and f11fdce: an operator parks a row while the relay is sending it.
-     * The relay's single mark records sent_while_parked_at instead of publishing, the database
-     * refuses discarding the delivered event even after last_error is cleared, no login can clear
-     * or forge the record outside a replay, and the runbook's replay works.
+     * DevSecOps on ac7b25c, f11fdce and 21a239d: an operator parks a row while the relay is sending
+     * it. The relay's single mark records sent_while_parked_at instead of publishing. The record is
+     * write-once: no login forges, clears or changes it, a replay keeps it, a new park after the
+     * replay still cannot be discarded, and the replayed row is published as usual.
      */
     @Test
     void aRowParkedDuringItsSendIsRecordedAndCannotBeDiscarded() throws Exception {
@@ -657,7 +657,7 @@ class AccountsLedgerServiceIT {
         when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
             ProducerRecord<String, String> record = invocation.getArgument(0);
             String eventId = new String(record.headers().lastHeader("eventId").value());
-            if (eventId.equals(opened.toString())) {
+            if (eventId.equals(opened.toString()) && !sentIds.contains(eventId)) {
                 operator.update("update " + SCHEMA + ".outbox_event set parked_at = now(),"
                     + " park_reason = 'INC-10: parked during the send' where event_id = ?", opened);
             }
@@ -690,7 +690,7 @@ class AccountsLedgerServiceIT {
             .hasMessageContaining("was already sent to Kafka; replay it instead of discarding it");
         for (JdbcTemplate role : List.of(jdbc, owner, operator)) {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = null"
-                + " where event_id = ?", opened)).hasMessageContaining("cleared only by a replay");
+                + " where event_id = ?", opened)).hasMessageContaining("is write-once");
         }
         // Only the relay records a send: no other login can forge it on a parked row.
         UUID parked = otherParkedRow(owner);
@@ -698,10 +698,29 @@ class AccountsLedgerServiceIT {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = now()"
                 + " where event_id = ?", parked)).rootCause().hasMessageContaining("is set only by the relay");
         }
-        operator.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
-            + " park_counted = false, last_error = null, sent_while_parked_at = null where event_id = ?", opened);
-        assertThat(owner.queryForObject("select parked_at is null and published_at is null from " + SCHEMA
-            + ".outbox_event where event_id = ?", Boolean.class, opened)).isTrue();
+        // Not even inside a replay (the reviewer's attack on 21a239d, step 1).
+        assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set parked_at = null,"
+            + " park_reason = null, sent_while_parked_at = null where event_id = ?", opened))
+            .hasMessageContaining("is write-once");
+
+        // The runbook replay keeps the record; a new park cannot be discarded either (steps 2 and 3).
+        String replay = "update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
+            + " park_counted = false, last_error = null where event_id = ?";
+        operator.update(replay, opened);
+        operator.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-10: again'"
+            + " where event_id = ?", opened);
+        assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
+            + " discard_reason = 'INC-10: discard after replay' where event_id = ?", opened))
+            .hasMessageContaining("was already sent to Kafka; replay it instead of discarding it");
+
+        // Replayed again, the relay publishes it as usual, record kept (the reviewer's probe G).
+        operator.update(replay, opened);
+        relay.relayOnce();
+        assertThat(owner.queryForObject("select published_at is not null and parked_at is null"
+            + " and sent_while_parked_at is not null from " + SCHEMA + ".outbox_event where event_id = ?",
+            Boolean.class, opened)).isTrue();
+        assertThat(sentIds).filteredOn(opened.toString()::equals).hasSize(2);
+        assertThat(outboxAudit(opened)).isZero();
     }
 
     /** DevSecOps on ac7b25c (should-fix 1): a request made before the note never becomes a discard. */

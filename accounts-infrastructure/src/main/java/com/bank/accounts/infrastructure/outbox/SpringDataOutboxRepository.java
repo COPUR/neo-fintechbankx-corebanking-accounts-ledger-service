@@ -29,10 +29,15 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
 
     /**
      * The relay's mark after a send, in one statement: an unparked row is marked published; a row
-     * an operator parked during the send gets sent_while_parked_at instead (V6), so the database
-     * refuses discarding an event Kafka has, and stays parked. Returns 1 either way (0 only if the
-     * row was published or discarded meanwhile); {@link #isUnpublished}, in the same transaction, tells which. Never a
-     * merge of the whole row read before the send.
+     * an operator parked during the send gets sent_while_parked_at instead (V6; write-once, V7), so
+     * the database refuses discarding an event Kafka has, and stays parked. Returns 1 either way (0
+     * only if the row was published or discarded meanwhile); {@link #isUnpublished}, in the same
+     * transaction, tells which. Never a merge of the whole row read before the send.
+     *
+     * <p>Relies on READ COMMITTED (the relay's transactions use the default): the UPDATE re-reads the
+     * latest committed row, so the CASE sees a park committed during the send, and waits for one
+     * still in flight. Under REPEATABLE READ or SERIALIZABLE the same race would fail the mark with
+     * a serialization error instead.
      */
     @Modifying
     @Query(value = """

@@ -97,14 +97,16 @@ where event_id = '<event id>' and published_at is null and parked_at is null;
 -- Replay: the relay picks the row up again in its original place, then the account's later rows.
 -- A row parked for a payload error parks again unless its cause (topic config, record size) was fixed.
 update sc_acc_accounts_ledger.outbox_event
-set parked_at = null, park_reason = null, park_counted = false, last_error = null, sent_while_parked_at = null
+set parked_at = null, park_reason = null, park_counted = false, last_error = null
 where event_id = '<event id>' and parked_at is not null;
 
--- Before a discard, check sent_while_parked_at: set means the relay delivered the event while it
--- was being parked. Replay that row (consumers de-duplicate on eventId). The database refuses
--- discarding it while the column is set, because the audit would call a delivered event never
--- published. Only the relay sets the column, and only a replay (which unparks the row in the same
--- statement) clears it; clearing last_error changes nothing.
+-- Before a discard, check sent_while_parked_at: set means the relay's mark found the row parked
+-- after it had delivered it to Kafka. Replay that row (consumers de-duplicate on eventId). The
+-- database refuses discarding a row with the column set, because the audit would call a delivered
+-- event never published. The column is write-once: only the relay sets it, nobody clears it, and
+-- a replay keeps it (the relay then publishes the row as usual). It is only as good as the mark:
+-- if the relay stops between the send and its mark, the row carries no record, so before a
+-- discard also check with the consumers' squads that they never received the event.
 -- Discard: consumers never receive this event. Only with the consumers' squads (payments, lending)
 -- agreed in the ticket, since a missing Debited or Credited event leaves their view of the
 -- balance wrong. This only requests it (a reason is required); the relay carries it out on its
@@ -134,8 +136,8 @@ insert is the discard: an audit row exists exactly when its discard happened.
     row cannot change at all until the purge deletes it.
   - An event id never changes, and a discarded event id cannot be inserted again after the purge.
   - A discard cannot be requested, or carried out, for a row with `sent_while_parked_at` set. Only
-    the runtime role sets it (in the relay's mark, on a parked row), and only a replay that unparks
-    the row in the same statement clears it.
+    the runtime role sets it (in the relay's mark, on a parked row); it is write-once, so a replay
+    followed by a new park still cannot be discarded.
   - The trigger `trg_outbox_discard_audit_derive` locks the requested outbox row and fills every
     audit column from it. It refuses an audit row for an event that has no pending request. A
     withdrawal or a new request that is still in flight makes a direct insert wait; the audit then
@@ -150,14 +152,13 @@ Operator logins get only what these steps need (Platform grants them per environ
 ```sql
 grant usage on schema sc_acc_accounts_ledger to <operator>;
 grant select on sc_acc_accounts_ledger.outbox_event, sc_acc_accounts_ledger.outbox_discard_audit to <operator>;
-grant update (parked_at, park_reason, park_counted, last_error, discard_requested_at, discard_reason,
-    sent_while_parked_at) on sc_acc_accounts_ledger.outbox_event to <operator>;
+grant update (parked_at, park_reason, park_counted, last_error, discard_requested_at, discard_reason)
+    on sc_acc_accounts_ledger.outbox_event to <operator>;
 ```
 
-No `published_at`, no INSERT or DELETE, nothing on the audit table but SELECT.
-`sent_while_parked_at` is in the grant only so the replay can clear it; the guard refuses an
-operator setting it, or clearing it without unparking. The guard
-refuses an operator publishing a row anyway; the column grant keeps that true without it.
+No `published_at` or `sent_while_parked_at`, no INSERT or DELETE, nothing on the audit table but
+SELECT. The guard refuses an operator publishing a row or writing `sent_while_parked_at` anyway;
+the column grant keeps that true without it.
 - The trigger `trg_outbox_discard_audit_mark` then marks the row published without sending it and
   clears `parked_at`, so the account's later events go out.
 - It counts the discard in `outbox_discarded_events_total` and logs a warning.

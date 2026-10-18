@@ -174,6 +174,26 @@ class OutboxRelayTest {
         assertThat(transactionLog).containsExactly("begin", "commit", "begin", "commit", "begin", "commit");
     }
 
+    /**
+     * DevSecOps note on 21a239d: the mark finds no unpublished row (0). Nothing is recorded or
+     * counted as sent-while-parked; the account's later rows wait for the next run.
+     */
+    @Test
+    void aMarkThatFindsNoUnpublishedRowRecordsNothingAndHoldsTheAccount() {
+        OutboxEventJpaEntity gone = row("ACC-G");
+        OutboxEventJpaEntity later = row("ACC-G");
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(gone, later));
+        when(kafka.send(any(ProducerRecord.class)))
+            .thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
+        when(outbox.markSent(gone.getEventId(), NOW)).thenReturn(0);
+
+        assertThat(relay.relayOnce()).isEqualTo(1);
+
+        verify(outbox, never()).isUnpublished(gone.getEventId());
+        verify(outbox, never()).markSent(later.getEventId(), NOW);
+        assertThat(meters.find(OutboxRelay.SENT_WHILE_PARKED).counter()).isNull();
+    }
+
     /** ADR-019 (owner decision 2026-10-08): one topic per aggregate, key = aggregateId, eventType/eventId/correlationId headers. */
     @Test
     void everyAccountEventGoesToTheAggregateTopicWithKeyAndHeaders() throws Exception {

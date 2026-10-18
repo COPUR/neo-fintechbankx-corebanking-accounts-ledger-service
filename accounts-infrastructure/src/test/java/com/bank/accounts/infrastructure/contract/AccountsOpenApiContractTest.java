@@ -49,6 +49,7 @@ class AccountsOpenApiContractTest {
         assertThat(spec).contains("\n  /api/v1/accounts/{accountId}/close:\n");
         assertThat(spec).contains("\n  /api/v1/journal-entries:\n");
         assertThat(spec).contains("\n  /api/v1/journal-entries/{journalEntryId}:\n");
+        assertThat(spec).contains("operationId: findJournalEntryByReference\n");
     }
 
     @Test

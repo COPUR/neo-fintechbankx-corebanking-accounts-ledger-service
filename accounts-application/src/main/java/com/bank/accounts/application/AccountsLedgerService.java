@@ -169,6 +169,18 @@ public class AccountsLedgerService implements OpenAccountUseCase, FindAccountUse
         return entries.findById(id).orElseThrow(() -> new JournalEntryNotFoundException(id));
     }
 
+    @Override
+    public JournalEntry findByReference(String reference) {
+        if (reference == null || reference.isBlank()) {
+            throw new IllegalArgumentException("reference is required");
+        }
+        String trimmed = reference.trim();
+        if (trimmed.length() > JournalEntry.MAX_REFERENCE_LENGTH) {
+            throw new IllegalArgumentException("reference is longer than " + JournalEntry.MAX_REFERENCE_LENGTH + " characters");
+        }
+        return entries.findByReference(trimmed).orElseThrow(() -> JournalEntryNotFoundException.forReference(trimmed));
+    }
+
     private void publish(Account account) {
         List<DomainEvent> pending = List.copyOf(account.getDomainEvents());
         if (!pending.isEmpty()) {

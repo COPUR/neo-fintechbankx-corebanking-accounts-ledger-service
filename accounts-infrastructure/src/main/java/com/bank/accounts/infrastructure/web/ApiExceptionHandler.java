@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -117,6 +118,11 @@ public class ApiExceptionHandler {
     ResponseEntity<ErrorResponse> unreadableBody(HttpMessageNotReadableException ex) {
         return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
             "The request body is not valid JSON or a field has an unsupported value");
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    ResponseEntity<ErrorResponse> missingParameter(MissingServletRequestParameterException ex) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Missing required parameter " + ex.getParameterName());
     }
 
     @ExceptionHandler(MissingRequestHeaderException.class)

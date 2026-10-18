@@ -145,6 +145,29 @@ class AccountsLedgerServiceIT {
         assertThat(jdbc.queryForObject("select count(*) from " + SCHEMA + ".journal_entry", Integer.class)).isEqualTo(2);
     }
 
+    /** Lending's reconciliation reads a booking by its business reference through the API, not the table. */
+    @Test
+    void aBookingIsFoundByItsReferenceThroughTheApi() throws Exception {
+        String alice = open("CUST-RF", "CURRENT", "k-rf");
+        String booked = json.readTree(book(entry("loan-disbursement:LN-42", clearing, alice, "250.00"))
+            .andExpect(status().isCreated())
+            .andReturn().getResponse().getContentAsString()).get("journalEntryId").asText();
+
+        mvc.perform(asService(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-42"),
+                "svc-ln-loan-lifecycle"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.journalEntryId").value(booked))
+            .andExpect(jsonPath("$.reference").value("loan-disbursement:LN-42"))
+            .andExpect(jsonPath("$.lines.length()").value(2));
+        mvc.perform(asService(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-43"),
+                "svc-ln-loan-lifecycle"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_NOT_FOUND"));
+        mvc.perform(asService(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-42"),
+                "svc-of-consent-authorization"))
+            .andExpect(status().isForbidden());
+    }
+
     @Test
     void theOpenAndBookResponsesAnswerTheStoredInstant() throws Exception {
         String response = mvc.perform(asBanker(post("/api/v1/accounts")).header("x-idempotency-key", "k-time")

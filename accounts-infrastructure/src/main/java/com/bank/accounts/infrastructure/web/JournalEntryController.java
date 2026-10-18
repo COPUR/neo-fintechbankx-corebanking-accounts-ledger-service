@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
@@ -45,6 +46,17 @@ public class JournalEntryController {
             return ResponseEntity.ok(body);
         }
         return ResponseEntity.created(URI.create("/api/v1/journal-entries/" + body.journalEntryId())).body(body);
+    }
+
+    /**
+     * The entry booked under a business reference, for reconciliation (for example
+     * loan-disbursement:&lt;loanId&gt;): staff, and the services allowed to post. A reference
+     * nobody booked is a 404.
+     */
+    @GetMapping
+    @PreAuthorize("hasAnyRole('BANKER', 'ADMIN') or " + Callers.LISTED_SERVICE)
+    public ResponseEntity<JournalEntryResponse> findByReference(@RequestParam String reference) {
+        return ResponseEntity.ok(JournalEntryResponse.from(findEntry.findByReference(reference), false));
     }
 
     @GetMapping("/{journalEntryId}")

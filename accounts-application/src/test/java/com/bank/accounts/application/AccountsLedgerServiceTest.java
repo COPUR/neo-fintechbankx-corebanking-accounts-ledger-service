@@ -217,6 +217,20 @@ class AccountsLedgerServiceTest {
     }
 
     @Test
+    void journalEntriesAreFoundByTheirTrimmedReference() {
+        PostingResult funded = fund(alice, "5.00", "FUND-R1");
+
+        assertThat(service.findByReference("  FUND-R1 ").getId()).isEqualTo(funded.entry().getId());
+        assertThatThrownBy(() -> service.findByReference("FUND-NONE"))
+            .isInstanceOf(JournalEntryNotFoundException.class)
+            .hasMessageContaining("FUND-NONE");
+        assertThatThrownBy(() -> service.findByReference(" "))
+            .isInstanceOf(IllegalArgumentException.class).hasMessage("reference is required");
+        assertThatThrownBy(() -> service.findByReference("R".repeat(129)))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("longer than 128");
+    }
+
+    @Test
     void everyWriteRunsInOneTransaction() {
         int before = transactions.opened();
 

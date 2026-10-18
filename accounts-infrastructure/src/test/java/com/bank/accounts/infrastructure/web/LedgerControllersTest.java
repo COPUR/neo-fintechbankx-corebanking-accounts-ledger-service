@@ -51,6 +51,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -276,6 +277,32 @@ class LedgerControllersTest {
             .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_NOT_FOUND"));
         mvc.perform(customer(get("/api/v1/journal-entries/JE-1"), "CUST-1")).andExpect(status().isForbidden());
         verify(findEntry).find(eq(JournalEntryId.of("JE-1")));
+    }
+
+    @Test
+    void anEntryIsFoundByReferenceByStaffAndListedServicesOnly() throws Exception {
+        when(findEntry.findByReference("PAY-1")).thenReturn(entry());
+        when(findEntry.findByReference("loan-disbursement:LN-9"))
+            .thenThrow(JournalEntryNotFoundException.forReference("loan-disbursement:LN-9"));
+
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "PAY-1"), "svc-ln-loan-lifecycle"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.reference").value("PAY-1"))
+            .andExpect(jsonPath("$.replay").value(false));
+        mvc.perform(as(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-9"), "banker", "ROLE_BANKER"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_NOT_FOUND"))
+            .andExpect(jsonPath("$.message").value("Journal entry not found"));
+        mvc.perform(as(get("/api/v1/journal-entries"), "admin", "ROLE_ADMIN"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value("Missing required parameter reference"));
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "PAY-1"), "svc-of-consent-authorization"))
+            .andExpect(status().isForbidden());
+        mvc.perform(customer(get("/api/v1/journal-entries").param("reference", "PAY-1"), "CUST-1"))
+            .andExpect(status().isForbidden());
+        verify(findEntry).findByReference(eq("PAY-1"));
+        verify(findEntry).findByReference(eq("loan-disbursement:LN-9"));
+        verifyNoMoreInteractions(findEntry);
     }
 
     @Test

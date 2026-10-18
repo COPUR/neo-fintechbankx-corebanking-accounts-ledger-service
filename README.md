@@ -70,6 +70,7 @@ consumed_events: []   # none, so the service owns no DLQ
 - `GET /api/v1/accounts/{id}`: `CUSTOMER` (own accounts only; any other id answers the same fixed 404 as an unknown one), `BANKER`, `ADMIN`, `SERVICE`.
 - Opening, freezing, unfreezing and closing: `BANKER`, `ADMIN`.
 - `POST /api/v1/journal-entries`: `ADMIN`, or a `SERVICE` token whose `azp` is on `SERVICE_CALLERS` (default `svc-pay-initiation-settlement,svc-pay-recurring-mandates,svc-pay-bulk-orchestration,svc-ln-loan-lifecycle`).
+- `GET /api/v1/journal-entries?reference=...` (reconciliation by business reference): `BANKER`, `ADMIN`, or a `SERVICE` token whose `azp` is on `SERVICE_CALLERS`.
 - The chart ships no Istio policies, no NetworkPolicy by default and no ServiceMonitor; the mesh and observability repos own them.
 
 ## Dokümantasyon ve Referanslar

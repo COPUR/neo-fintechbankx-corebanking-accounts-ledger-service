@@ -234,6 +234,44 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
+    get:
+      tags: [Journal]
+      summary: Find a journal entry by its reference
+      operationId: findJournalEntryByReference
+      description: |-
+        The entry booked under a business reference, for reconciliation (for
+        example loan-disbursement:<loanId>). The reference is trimmed, as
+        posting stores it. A reference nobody booked answers 404
+        JOURNAL_ENTRY_NOT_FOUND. Allowed for BANKER and ADMIN, and for
+        SERVICE tokens whose client (azp) is on SERVICE_CALLERS.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - name: reference
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      responses:
+        '200':
+          description: The entry booked under this reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/journal-entries/{journalEntryId}:
     get:
       tags: [Journal]

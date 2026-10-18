@@ -641,12 +641,13 @@ class AccountsLedgerServiceIT {
     }
 
     /**
-     * DevSecOps on ac7b25c (should-fix 1): an operator parks a row while the relay is sending it.
-     * The relay's mark changes nothing, the row is noted "sent while parked", the database then
-     * refuses discarding the delivered event, and the runbook's replay works.
+     * DevSecOps on ac7b25c and f11fdce: an operator parks a row while the relay is sending it.
+     * The relay's single mark records sent_while_parked_at instead of publishing, the database
+     * refuses discarding the delivered event even after last_error is cleared, no login can clear
+     * or forge the record outside a replay, and the runbook's replay works.
      */
     @Test
-    void aRowParkedDuringItsSendIsNotedAndCannotBeDiscarded() throws Exception {
+    void aRowParkedDuringItsSendIsRecordedAndCannotBeDiscarded() throws Exception {
         String ivan = open("CUST-V", "CURRENT", "k-v");
         JdbcTemplate owner = PostgresTestDatabase.owner();
         JdbcTemplate operator = PostgresTestDatabase.operator();
@@ -671,26 +672,41 @@ class AccountsLedgerServiceIT {
         relay.relayOnce();
 
         assertThat(sentIds).contains(opened.toString());
-        Map<String, Object> row = owner.queryForMap("select published_at, parked_at, park_reason, last_error from "
-            + SCHEMA + ".outbox_event where event_id = ?", opened);
+        Map<String, Object> row = owner.queryForMap("select published_at, parked_at, park_reason, last_error,"
+            + " sent_while_parked_at from " + SCHEMA + ".outbox_event where event_id = ?", opened);
         assertThat(row.get("published_at")).isNull();
         assertThat(row.get("parked_at")).isNotNull();
+        assertThat(row.get("sent_while_parked_at")).isNotNull();
         assertThat(row.get("park_reason")).isEqualTo("INC-10: parked during the send");
-        assertThat((String) row.get("last_error")).startsWith("sent while parked: delivered to Kafka at ");
+        assertThat((String) row.get("last_error")).startsWith("sent while parked: delivered to Kafka");
         assertThat(meters.counter("outbox.sent.while.parked").count()).isEqualTo(1.0);
 
+        // The reviewer's attack on f11fdce: clear last_error, then request the discard.
+        for (JdbcTemplate role : List.of(operator, jdbc)) {
+            role.update("update " + SCHEMA + ".outbox_event set last_error = null where event_id = ?", opened);
+        }
         assertThatThrownBy(() -> operator.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
             + " discard_reason = 'INC-10: discard' where event_id = ?", opened))
             .hasMessageContaining("was already sent to Kafka; replay it instead of discarding it");
+        for (JdbcTemplate role : List.of(jdbc, owner, operator)) {
+            assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = null"
+                + " where event_id = ?", opened)).hasMessageContaining("cleared only by a replay");
+        }
+        // Only the relay records a send: no other login can forge it on a parked row.
+        UUID parked = otherParkedRow(owner);
+        for (JdbcTemplate role : List.of(owner, operator)) {
+            assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set sent_while_parked_at = now()"
+                + " where event_id = ?", parked)).rootCause().hasMessageContaining("is set only by the relay");
+        }
         operator.update("update " + SCHEMA + ".outbox_event set parked_at = null, park_reason = null,"
-            + " park_counted = false, last_error = null where event_id = ?", opened);
+            + " park_counted = false, last_error = null, sent_while_parked_at = null where event_id = ?", opened);
         assertThat(owner.queryForObject("select parked_at is null and published_at is null from " + SCHEMA
             + ".outbox_event where event_id = ?", Boolean.class, opened)).isTrue();
     }
 
     /** DevSecOps on ac7b25c (should-fix 1): a request made before the note never becomes a discard. */
     @Test
-    void aDiscardRequestedBeforeTheSentNoteIsSkippedAndShowsAsWaiting() throws Exception {
+    void aDiscardRequestedBeforeTheSendRecordIsSkippedAndShowsAsWaiting() throws Exception {
         String jana = open("CUST-N", "CURRENT", "k-n");
         JdbcTemplate owner = PostgresTestDatabase.owner();
         UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
@@ -700,10 +716,11 @@ class AccountsLedgerServiceIT {
         owner.update("update " + SCHEMA + ".outbox_event set discard_requested_at = now(),"
             + " discard_reason = 'INC-11: agreed' where event_id = ?", opened);
         assertThat(outbox.oldestPendingDiscardRequestedAt()).isNotNull();
-        // What the relay writes when the send it was making turns out to be this row's.
+        // The relay's mark when the send it was making turns out to be this row's.
         TransactionTemplate claim = new TransactionTemplate(transactionManager);
-        Integer noted = claim.execute(status -> outbox.noteSentWhileParked(opened, "sent while parked: test"));
-        assertThat(noted).isOne();
+        Boolean parkedDuringSend = claim.execute(status ->
+            outbox.markSent(opened, java.time.Instant.now()) == 1 ? outbox.isUnpublished(opened) : null);
+        assertThat(parkedDuringSend).isTrue();
 
         Integer discarded = claim.execute(status -> outbox.auditDiscardRequests());
         assertThat(discarded).isZero();
@@ -725,6 +742,16 @@ class AccountsLedgerServiceIT {
             assertThatThrownBy(() -> role.update("update " + SCHEMA + ".outbox_event set event_id = ? where event_id = ?",
                 UUID.randomUUID(), opened)).hasMessageContaining("the event id cannot change");
         }
+    }
+
+    /** A freshly parked row of a new account, for attempts that must not touch the row under test. */
+    private UUID otherParkedRow(JdbcTemplate owner) throws Exception {
+        String account = open(null, "INTERNAL", "k-other-" + UUID.randomUUID());
+        UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
+            + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, account);
+        owner.update("update " + SCHEMA + ".outbox_event set parked_at = now(), park_reason = 'INC-12: test'"
+            + " where event_id = ?", opened);
+        return opened;
     }
 
     private int outboxAudit(UUID eventId) {

@@ -28,16 +28,27 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
     List<OutboxEventJpaEntity> findUnpublishedBatch(@Param("batchSize") int batchSize);
 
     /**
-     * The relay's published mark, after the send: only while the row is still unparked. An
-     * operator may park the row while the relay is sending it; then nothing is marked (0) and the
-     * relay notes it on the row instead. Never a merge of the whole row read before the send.
+     * The relay's mark after a send, in one statement: an unparked row is marked published; a row
+     * an operator parked during the send gets sent_while_parked_at instead (V6), so the database
+     * refuses discarding an event Kafka has, and stays parked. Returns 1 either way (0 only if the
+     * row was published or discarded meanwhile); {@link #isUnpublished}, in the same transaction, tells which. Never a
+     * merge of the whole row read before the send.
      */
     @Modifying
     @Query(value = """
-        update outbox_event set published_at = :at, attempts = attempts + 1, last_error = null
-        where event_id = :id and published_at is null and parked_at is null
+        update outbox_event set
+            published_at = case when parked_at is null then cast(:at as timestamptz) end,
+            sent_while_parked_at = case when parked_at is not null
+                then coalesce(sent_while_parked_at, cast(:at as timestamptz)) else sent_while_parked_at end,
+            attempts = attempts + 1,
+            last_error = case when parked_at is not null
+                then 'sent while parked: delivered to Kafka; replay it, do not discard it' end
+        where event_id = :id and published_at is null
         """, nativeQuery = true)
-    int markPublished(@Param("id") UUID eventId, @Param("at") Instant at);
+    int markSent(@Param("id") UUID eventId, @Param("at") Instant at);
+
+    @Query(value = "select published_at is null from outbox_event where event_id = :id", nativeQuery = true)
+    Boolean isUnpublished(@Param("id") UUID eventId);
 
     /** A payload error parks the row, unless an operator parked it first (0). */
     @Modifying
@@ -48,17 +59,6 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
         """, nativeQuery = true)
     int markParked(@Param("id") UUID eventId, @Param("at") Instant at, @Param("error") String error,
                    @Param("reason") String reason);
-
-    /**
-     * Records on a row an operator parked during its send that Kafka has it ("sent while parked"):
-     * the database then refuses discarding it (V5), and the runbook replays it instead.
-     */
-    @Modifying
-    @Query(value = """
-        update outbox_event set attempts = attempts + 1, last_error = :note
-        where event_id = :id and published_at is null
-        """, nativeQuery = true)
-    int noteSentWhileParked(@Param("id") UUID eventId, @Param("note") String note);
 
     /** When the oldest discard request still waiting for the relay was made (null if none). */
     @Query(value = """
@@ -99,7 +99,7 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
         select o.event_id
         from outbox_event o
         where o.discard_requested_at is not null and o.parked_at is not null and o.published_at is null
-          and (o.last_error is null or o.last_error not like 'sent while parked%')
+          and o.sent_while_parked_at is null
         order by o.created_seq
         for update of o skip locked
         on conflict (event_id) do nothing

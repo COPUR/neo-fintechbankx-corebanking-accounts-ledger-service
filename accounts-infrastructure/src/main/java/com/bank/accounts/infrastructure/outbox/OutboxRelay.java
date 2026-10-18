@@ -79,7 +79,6 @@ public class OutboxRelay {
     static final String OPERATOR_PARK = "OperatorPark";
     static final String DISCARDED_EVENTS = "outbox.discarded.events";
     static final String SENT_WHILE_PARKED = "outbox.sent.while.parked";
-    static final String SENT_WHILE_PARKED_NOTE = "sent while parked";
     static final Duration BACKOFF_START = Duration.ofSeconds(1);
     static final Duration BACKOFF_MAX = Duration.ofMinutes(5);
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
@@ -170,11 +169,14 @@ public class OutboxRelay {
                 backOff(e);
                 return sent;
             }
-            Instant publishedAt = clock.instant();
-            row.markPublished(publishedAt);
-            if (update(() -> outbox.markPublished(row.getEventId(), publishedAt)) == 0) {
-                // An operator parked it during the send: Kafka has it, the row says otherwise.
-                sentWhileParked(row, publishedAt);
+            Instant sentAt = clock.instant();
+            row.markPublished(sentAt);
+            // One statement marks the row published, or, if an operator parked it during the send,
+            // records sent_while_parked_at on it; the read in the same transaction tells which.
+            Boolean parkedDuringSend = transactions.execute(status ->
+                outbox.markSent(row.getEventId(), sentAt) == 1 ? outbox.isUnpublished(row.getEventId()) : null);
+            if (!Boolean.FALSE.equals(parkedDuringSend)) {
+                sentWhileParked(row, parkedDuringSend != null);
                 blockedAggregates.add(row.getAggregateId());
             }
             sent++;
@@ -191,17 +193,18 @@ public class OutboxRelay {
     }
 
     /**
-     * The row stays parked and unpublished, so it is noted ("sent while parked") instead: the
-     * database then refuses discarding it, and the runbook replays it (consumers de-duplicate on
-     * eventId). Counted in outbox_sent_while_parked_total.
+     * Kafka has the event but the row stayed parked; markSent recorded sent_while_parked_at, so the
+     * database refuses discarding it and the runbook replays it (consumers de-duplicate on eventId).
+     * Counted in outbox_sent_while_parked_total.
      */
-    private void sentWhileParked(OutboxEventJpaEntity row, Instant sentAt) {
-        String note = SENT_WHILE_PARKED_NOTE + ": delivered to Kafka at " + sentAt + "; replay it, do not discard it";
-        int noted = update(() -> outbox.noteSentWhileParked(row.getEventId(), note));
-        meters.counter(SENT_WHILE_PARKED).increment();
+    private void sentWhileParked(OutboxEventJpaEntity row, boolean recorded) {
+        if (recorded) {
+            meters.counter(SENT_WHILE_PARKED).increment();
+        }
         log.error("Outbox relay sent event {} ({}) while an operator parked it; {} (docs/RUNBOOK.md, Outbox)",
-            row.getEventId(), row.getEventType(),
-            noted == 1 ? "noted in last_error; replay it, do not discard it" : "the row was discarded meanwhile");
+            row.getEventId(), row.getEventType(), recorded
+                ? "recorded in sent_while_parked_at; replay it, do not discard it"
+                : "the row was no longer unpublished, nothing was marked");
     }
 
     /** ADR-021 decision 4 payload errors: the record itself can never be sent. */

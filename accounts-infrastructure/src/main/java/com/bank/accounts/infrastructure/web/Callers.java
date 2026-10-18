@@ -19,6 +19,14 @@ final class Callers {
     private Callers() {
     }
 
+    /** The calling client id (token azp), or "-" for a token without one. */
+    static String client(Authentication authentication) {
+        Object azp = authentication instanceof JwtAuthenticationToken token
+            ? token.getToken().getClaims().get("azp")
+            : null;
+        return azp == null ? "-" : azp.toString();
+    }
+
     static Caller of(Authentication authentication) {
         boolean staff = authentication.getAuthorities().stream()
             .map(GrantedAuthority::getAuthority)

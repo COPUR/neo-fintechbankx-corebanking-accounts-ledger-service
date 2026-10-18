@@ -119,12 +119,12 @@ class AccountsLedgerServiceIT {
     void openFundMoveAndReadAnAccountTheWayPaymentsDo() throws Exception {
         String alice = open("CUST-A", "CURRENT", "k-a");
         String bob = open("CUST-B", "SAVINGS", "k-b");
-        book(entry("FUND-1", clearing, alice, "100.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-1", clearing, alice, "100.00")).andExpect(status().isCreated());
 
-        book(entry("PAY-1", alice, bob, "40.00"))
+        book(entry("payment-PAY-1", alice, bob, "40.00"))
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.replay").value(false));
-        book(entry("PAY-1", alice, bob, "40.00"))
+        book(entry("payment-PAY-1", alice, bob, "40.00"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.replay").value(true));
 
@@ -149,7 +149,7 @@ class AccountsLedgerServiceIT {
     @Test
     void aBookingIsFoundByItsReferenceThroughTheApi() throws Exception {
         String alice = open("CUST-RF", "CURRENT", "k-rf");
-        String booked = json.readTree(book(entry("loan-disbursement:LN-42", clearing, alice, "250.00"))
+        String booked = json.readTree(book("svc-ln-loan-lifecycle", entry("loan-disbursement:LN-42", clearing, alice, "250.00"))
             .andExpect(status().isCreated())
             .andReturn().getResponse().getContentAsString()).get("journalEntryId").asText();
 
@@ -166,6 +166,15 @@ class AccountsLedgerServiceIT {
         mvc.perform(asService(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-42"),
                 "svc-of-consent-authorization"))
             .andExpect(status().isForbidden());
+        mvc.perform(asService(get("/api/v1/journal-entries").param("reference", "loan-disbursement:LN-42"),
+                "svc-pay-initiation-settlement"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_NOT_FOUND"))
+            .andExpect(jsonPath("$.message").value("Journal entry not found"));
+        book(entry("loan-disbursement:LN-42", clearing, alice, "250.00")).andExpect(status().isForbidden());
+        book("svc-ln-loan-lifecycle", entry("payment-LN-42", clearing, alice, "250.00"))
+            .andExpect(status().isForbidden());
+        assertThat(jdbc.queryForObject("select count(*) from " + SCHEMA + ".journal_entry", Integer.class)).isEqualTo(1);
     }
 
     @Test
@@ -180,23 +189,23 @@ class AccountsLedgerServiceIT {
         assertThat(Instant.parse(opened.get("openedAt").asText())).isEqualTo(jdbc.queryForObject(
             "select opened_at from " + SCHEMA + ".account where account_id = ?", Instant.class, account));
 
-        JsonNode booked = json.readTree(book(entry("TIME-1", clearing, account, "1.00"))
+        JsonNode booked = json.readTree(book(entry("payment-TIME-1", clearing, account, "1.00"))
             .andExpect(status().isCreated())
             .andReturn().getResponse().getContentAsString());
         assertThat(Instant.parse(booked.get("bookedAt").asText())).isEqualTo(jdbc.queryForObject(
-            "select booked_at from " + SCHEMA + ".journal_entry where reference = 'TIME-1'", Instant.class));
+            "select booked_at from " + SCHEMA + ".journal_entry where reference = 'payment-TIME-1'", Instant.class));
     }
 
     @Test
     void anOverdraftBooksNothingAndTheSameReferenceWithOtherLinesIsAConflict() throws Exception {
         String alice = open("CUST-A", "CURRENT", "k-a");
-        book(entry("FUND-1", clearing, alice, "10.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-1", clearing, alice, "10.00")).andExpect(status().isCreated());
         long eventsBefore = outbox.count();
 
-        book(entry("PAY-2", alice, clearing, "10.01"))
+        book(entry("payment-PAY-2", alice, clearing, "10.01"))
             .andExpect(status().isUnprocessableEntity())
             .andExpect(jsonPath("$.code").value("INSUFFICIENT_FUNDS"));
-        book(entry("FUND-1", clearing, alice, "11.00"))
+        book(entry("payment-FUND-1", clearing, alice, "11.00"))
             .andExpect(status().isConflict())
             .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
 
@@ -214,12 +223,12 @@ class AccountsLedgerServiceIT {
     void concurrentPostingsNeitherLoseUpdatesNorOverdraw() throws Exception {
         String alice = open("CUST-A", "CURRENT", "k-a");
         String bob = open("CUST-B", "CURRENT", "k-b");
-        book(entry("FUND-1", clearing, alice, "100.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-1", clearing, alice, "100.00")).andExpect(status().isCreated());
 
         ExecutorService pool = Executors.newFixedThreadPool(8);
         List<Callable<Integer>> calls = new ArrayList<>();
         for (int i = 0; i < 20; i++) {
-            String reference = "RACE-" + i;
+            String reference = "payment-RACE-" + i;
             calls.add(() -> book(entry(reference, alice, bob, "10.00")).andReturn().getResponse().getStatus());
         }
         List<Integer> statuses = new ArrayList<>();
@@ -244,12 +253,12 @@ class AccountsLedgerServiceIT {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("FROZEN"));
 
-        book(entry("FUND-1", clearing, alice, "1.00"))
+        book(entry("payment-FUND-1", clearing, alice, "1.00"))
             .andExpect(status().isUnprocessableEntity())
             .andExpect(jsonPath("$.code").value("ACCOUNT_NOT_OPERATIONAL"));
 
         mvc.perform(asBanker(post("/api/v1/accounts/" + alice + "/unfreeze"))).andExpect(status().isOk());
-        book(entry("FUND-1", clearing, alice, "1.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-1", clearing, alice, "1.00")).andExpect(status().isCreated());
     }
 
     @Test
@@ -265,7 +274,7 @@ class AccountsLedgerServiceIT {
     @Test
     void theRelayPublishesEveryAccountEventToTheAggregateTopicKeyedByAccountId() throws Exception {
         String alice = open("CUST-A", "CURRENT", "k-a");
-        book(entry("FUND-1", clearing, alice, "5.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-1", clearing, alice, "5.00")).andExpect(status().isCreated());
         List<ProducerRecord<String, String>> sent = new ArrayList<>();
         when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
             sent.add(invocation.getArgument(0));
@@ -296,7 +305,7 @@ class AccountsLedgerServiceIT {
     @Test
     void anOperatorDiscardIsAuditedWithWhoAskedAndReleasesTheAccountsLaterEvents() throws Exception {
         String alice = open("CUST-D", "CURRENT", "k-d");
-        book(entry("FUND-D", clearing, alice, "5.00")).andExpect(status().isCreated());
+        book(entry("payment-FUND-D", clearing, alice, "5.00")).andExpect(status().isCreated());
         JdbcTemplate owner = PostgresTestDatabase.owner();
         UUID opened = owner.queryForObject("select event_id from " + SCHEMA + ".outbox_event"
             + " where aggregate_id = ? and event_type = 'CoreBanking.Account.Opened.v1'", UUID.class, alice);
@@ -950,7 +959,11 @@ class AccountsLedgerServiceIT {
     }
 
     private org.springframework.test.web.servlet.ResultActions book(String body) throws Exception {
-        return mvc.perform(asService(post("/api/v1/journal-entries"), "svc-pay-initiation-settlement")
+        return book("svc-pay-initiation-settlement", body);
+    }
+
+    private org.springframework.test.web.servlet.ResultActions book(String client, String body) throws Exception {
+        return mvc.perform(asService(post("/api/v1/journal-entries"), client)
             .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

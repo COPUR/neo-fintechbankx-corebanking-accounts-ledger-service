@@ -130,6 +130,9 @@ accounts:
     # Client ids (token azp) whose SERVICE tokens may post journal entries;
     # comma-separated. Admins need no entry.
     service-callers: ${SERVICE_CALLERS:svc-pay-initiation-settlement,svc-pay-recurring-mandates,svc-pay-bulk-orchestration,svc-ln-loan-lifecycle}
+    # The references each listed service owns, as client=prefix pairs: a service
+    # posts and looks up only references starting with its prefixes.
+    service-reference-prefixes: ${SERVICE_REFERENCE_PREFIXES:svc-pay-initiation-settlement=payment-,svc-pay-recurring-mandates=mandate-,svc-pay-bulk-orchestration=bulk-,svc-ln-loan-lifecycle=loan-}
   outbox:
     retention: P7D
     relay:

@@ -70,6 +70,8 @@ config:
   OIDC_AUDIENCE: svc-acc-accounts-ledger
   # Comma-separated azp allow-list for POST /api/v1/journal-entries.
   SERVICE_CALLERS: svc-pay-initiation-settlement,svc-pay-recurring-mandates,svc-pay-bulk-orchestration,svc-ln-loan-lifecycle
+  # client=prefix pairs: the references each listed service may post and look up.
+  SERVICE_REFERENCE_PREFIXES: svc-pay-initiation-settlement=payment-,svc-pay-recurring-mandates=mandate-,svc-pay-bulk-orchestration=bulk-,svc-ln-loan-lifecycle=loan-
   OUTBOX_RELAY_ENABLED: "false"
 
 # Extra container env entries ({name, value} or {name, valueFrom}) for the

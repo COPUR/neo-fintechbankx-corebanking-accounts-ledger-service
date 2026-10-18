@@ -196,7 +196,11 @@ paths:
         business key: the same reference with the same lines answers 200 with
         the first booking (replay true); with other lines it is a 409.
         Allowed for ADMIN and for SERVICE tokens whose client (azp) is on
-        SERVICE_CALLERS.
+        SERVICE_CALLERS. A service posts only references that start with one
+        of its prefixes (SERVICE_REFERENCE_PREFIXES; by default payment- for
+        svc-pay-initiation-settlement, mandate- for svc-pay-recurring-mandates,
+        bulk- for svc-pay-bulk-orchestration, loan- for svc-ln-loan-lifecycle);
+        any other reference is a 403.
       security:
         - bearerAuth: []
       parameters:
@@ -243,7 +247,10 @@ paths:
         example loan-disbursement:<loanId>). The reference is trimmed, as
         posting stores it. A reference nobody booked answers 404
         JOURNAL_ENTRY_NOT_FOUND. Allowed for BANKER and ADMIN, and for
-        SERVICE tokens whose client (azp) is on SERVICE_CALLERS.
+        SERVICE tokens whose client (azp) is on SERVICE_CALLERS; a service
+        sees only references with its own prefixes, and any other reference
+        answers the same fixed 404, booked or not. Every lookup is written to
+        the audit log.
       security:
         - bearerAuth: []
       parameters:

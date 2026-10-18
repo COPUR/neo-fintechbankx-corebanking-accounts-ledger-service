@@ -26,14 +26,15 @@ An unknown id answers 404 `ACCOUNT_NOT_FOUND`.
 `POST /api/v1/journal-entries` from a client whose `azp` is on `SERVICE_CALLERS`:
 
 ```json
-{"reference":"PAY-123","currency":"AED","narrative":"payment PAY-123","lines":[
+{"reference":"payment-PAY-123","currency":"AED","narrative":"payment PAY-123","lines":[
   {"accountId":"ACC-...","side":"DEBIT","amount":40.00},
   {"accountId":"ACC-...","side":"CREDIT","amount":40.00}]}
 ```
 
-- `reference` is your business key (payment id, mandate collection id). Retrying with the same reference and the same lines answers 200 with the first booking (`replay: true`); the same reference with other lines answers 409 `IDEMPOTENCY_KEY_REUSED`.
+- `reference` is your business key (payment id, mandate collection id), and it starts with your service's prefix from `SERVICE_REFERENCE_PREFIXES`: `payment-` (svc-pay-initiation-settlement), `mandate-` (svc-pay-recurring-mandates), `bulk-` (svc-pay-bulk-orchestration), `loan-` (svc-ln-loan-lifecycle, for example `loan-disbursement:<loanId>`). Any other reference answers 403. Retrying with the same reference and the same lines answers 200 with the first booking (`replay: true`); the same reference with other lines answers 409 `IDEMPOTENCY_KEY_REUSED`.
 - 422 `INSUFFICIENT_FUNDS`: a customer account would go below zero. 422 `ACCOUNT_NOT_OPERATIONAL`: frozen or closed. 422 `UNBALANCED_ENTRY`: debits differ from credits.
 - 409 `CONCURRENT_UPDATE` or `DUPLICATE_REQUEST`: retry with the same reference.
+- `GET /api/v1/journal-entries?reference=...` answers the entry booked under one of your references. Another service's reference answers the same 404 `JOURNAL_ENTRY_NOT_FOUND` as one nobody booked; a blank reference or one over 128 characters is a 400. Every lookup is audit-logged.
 - Money into or out of the bank goes against an internal account (for example a clearing account) that an admin opens with `accountType: INTERNAL`.
 
 ## Events

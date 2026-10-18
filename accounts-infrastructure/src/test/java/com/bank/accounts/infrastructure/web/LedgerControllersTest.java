@@ -28,6 +28,9 @@ import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -46,6 +49,7 @@ import java.time.Instant;
 import java.util.Currency;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -62,11 +66,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /** Web slice with the real security rules, the caller taken from the token, and the error mapping. */
 @WebMvcTest(controllers = {AccountController.class, JournalEntryController.class})
+@ExtendWith(OutputCaptureExtension.class)
 class LedgerControllersTest {
 
     @SpringBootConfiguration
     @Import({AccountController.class, JournalEntryController.class, ApiExceptionHandler.class,
-        SecurityConfiguration.class, ServiceCallerPolicy.class})
+        SecurityConfiguration.class, ServiceCallerPolicy.class, CorrelationIdFilter.class})
     static class Slice {
     }
 
@@ -77,6 +82,7 @@ class LedgerControllersTest {
           {"accountId":"ACC-1","side":"DEBIT","amount":40.00},
           {"accountId":"ACC-2","side":"CREDIT","amount":40.00}]}
         """;
+    private static final String SERVICE_ENTRY = ENTRY.replace("\"PAY-1\"", "\"payment-PAY-1\"");
 
     @Autowired MockMvc mvc;
     @MockBean OpenAccountUseCase open;
@@ -202,17 +208,17 @@ class LedgerControllersTest {
 
     @Test
     void aListedServicePostsAnEntryAndAReplayAnswers200() throws Exception {
-        when(postEntry.post(argThat(command -> command != null && command.reference().equals("PAY-1"))))
+        when(postEntry.post(argThat(command -> command != null && command.reference().equals("payment-PAY-1"))))
             .thenReturn(new PostingResult(entry(), false), new PostingResult(entry(), true));
 
         mvc.perform(service(post("/api/v1/journal-entries"), "svc-pay-initiation-settlement")
-                .contentType(MediaType.APPLICATION_JSON).content(ENTRY))
+                .contentType(MediaType.APPLICATION_JSON).content(SERVICE_ENTRY))
             .andExpect(status().isCreated())
             .andExpect(header().string("Location", "/api/v1/journal-entries/JE-1"))
             .andExpect(jsonPath("$.replay").value(false))
             .andExpect(jsonPath("$.lines[0].side").value("DEBIT"));
         mvc.perform(service(post("/api/v1/journal-entries"), "svc-pay-initiation-settlement")
-                .contentType(MediaType.APPLICATION_JSON).content(ENTRY))
+                .contentType(MediaType.APPLICATION_JSON).content(SERVICE_ENTRY))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.replay").value(true));
     }
@@ -229,6 +235,29 @@ class LedgerControllersTest {
                 .contentType(MediaType.APPLICATION_JSON).content(ENTRY))
             .andExpect(status().isForbidden());
         verifyNoInteractions(postEntry);
+    }
+
+    @Test
+    void aServicePostsOnlyUnderItsOwnPrefixWhileAnAdminIsNotScoped() throws Exception {
+        when(postEntry.post(any(PostJournalEntryCommand.class))).thenReturn(new PostingResult(entry(), false));
+
+        mvc.perform(service(post("/api/v1/journal-entries"), "svc-ln-loan-lifecycle")
+                .contentType(MediaType.APPLICATION_JSON).content(SERVICE_ENTRY))
+            .andExpect(status().isForbidden());
+        mvc.perform(service(post("/api/v1/journal-entries"), "svc-pay-initiation-settlement")
+                .contentType(MediaType.APPLICATION_JSON).content(ENTRY))
+            .andExpect(status().isForbidden());
+        verifyNoInteractions(postEntry);
+
+        mvc.perform(service(post("/api/v1/journal-entries"), "svc-ln-loan-lifecycle")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(ENTRY.replace("\"PAY-1\"", "\" loan-disbursement:LN-9 \"")))
+            .andExpect(status().isCreated());
+        mvc.perform(as(post("/api/v1/journal-entries"), "admin", "ROLE_ADMIN")
+                .contentType(MediaType.APPLICATION_JSON).content(ENTRY))
+            .andExpect(status().isCreated());
+        verify(postEntry).post(argThat(command -> command.reference().equals(" loan-disbursement:LN-9 ")));
+        verify(postEntry).post(argThat(command -> command.reference().equals("PAY-1")));
     }
 
     @Test
@@ -281,11 +310,12 @@ class LedgerControllersTest {
 
     @Test
     void anEntryIsFoundByReferenceByStaffAndListedServicesOnly() throws Exception {
-        when(findEntry.findByReference("PAY-1")).thenReturn(entry());
+        when(findEntry.findByReference("loan-disbursement:LN-1")).thenReturn(entry());
         when(findEntry.findByReference("loan-disbursement:LN-9"))
             .thenThrow(JournalEntryNotFoundException.forReference("loan-disbursement:LN-9"));
 
-        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "PAY-1"), "svc-ln-loan-lifecycle"))
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", " loan-disbursement:LN-1 "),
+                "svc-ln-loan-lifecycle"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.reference").value("PAY-1"))
             .andExpect(jsonPath("$.replay").value(false));
@@ -300,9 +330,72 @@ class LedgerControllersTest {
             .andExpect(status().isForbidden());
         mvc.perform(customer(get("/api/v1/journal-entries").param("reference", "PAY-1"), "CUST-1"))
             .andExpect(status().isForbidden());
-        verify(findEntry).findByReference(eq("PAY-1"));
+        verify(findEntry).findByReference(eq("loan-disbursement:LN-1"));
         verify(findEntry).findByReference(eq("loan-disbursement:LN-9"));
         verifyNoMoreInteractions(findEntry);
+    }
+
+    @Test
+    void anotherServicesReferenceIsTheSameFixed404WithoutReadingTheJournal(CapturedOutput output) throws Exception {
+        when(findEntry.findByReference("payment-PAY-1")).thenReturn(entry());
+
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "payment-PAY-1"), "svc-ln-loan-lifecycle")
+                .header("x-fapi-interaction-id", "it-scope-1"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_NOT_FOUND"))
+            .andExpect(jsonPath("$.message").value("Journal entry not found"));
+        verifyNoInteractions(findEntry);
+
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "payment-PAY-1"),
+                "svc-pay-initiation-settlement").header("x-fapi-interaction-id", "it-scope-2"))
+            .andExpect(status().isOk());
+        mvc.perform(as(get("/api/v1/journal-entries").param("reference", "payment-PAY-1"), "banker", "ROLE_BANKER"))
+            .andExpect(status().isOk());
+
+        assertThat(output.getOut())
+            .contains("outcome=OUT_OF_SCOPE client=svc-ln-loan-lifecycle subject=service-account-svc-ln-loan-lifecycle"
+                + " reference=payment-PAY-1 interactionId=it-scope-1")
+            .contains("outcome=FOUND client=svc-pay-initiation-settlement"
+                + " subject=service-account-svc-pay-initiation-settlement reference=payment-PAY-1 interactionId=it-scope-2")
+            .contains("outcome=FOUND client=- subject=banker reference=payment-PAY-1");
+    }
+
+    @Test
+    void aBlankOrTooLongReferenceIsA400AtTheWebLayer(CapturedOutput output) throws Exception {
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "   "), "svc-ln-loan-lifecycle"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.message").value("reference is required"));
+        mvc.perform(as(get("/api/v1/journal-entries").param("reference", ""), "banker", "ROLE_BANKER"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "loan-" + "x".repeat(124)),
+                "svc-ln-loan-lifecycle"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.message").value("reference is longer than 128 characters"));
+        verifyNoInteractions(findEntry);
+
+        when(findEntry.findByReference("loan-" + "x".repeat(123)))
+            .thenThrow(JournalEntryNotFoundException.forReference("loan-" + "x".repeat(123)));
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "loan-" + "x".repeat(123)),
+                "svc-ln-loan-lifecycle"))
+            .andExpect(status().isNotFound());
+        assertThat(output.getOut()).contains("outcome=INVALID client=svc-ln-loan-lifecycle")
+            .contains("reference=- ").contains("outcome=NOT_FOUND client=svc-ln-loan-lifecycle")
+            .doesNotContain("x".repeat(124));
+    }
+
+    @Test
+    void aControlCharacterInTheReferenceDoesNotForgeAnAuditLine(CapturedOutput output) throws Exception {
+        when(findEntry.findByReference("loan-1\noutcome=FOUND"))
+            .thenThrow(JournalEntryNotFoundException.forReference("loan-1\noutcome=FOUND"));
+
+        mvc.perform(service(get("/api/v1/journal-entries").param("reference", "loan-1\noutcome=FOUND"),
+                "svc-ln-loan-lifecycle"))
+            .andExpect(status().isNotFound());
+        assertThat(output.getOut()).contains("reference=loan-1_outcome=FOUND")
+            .doesNotContain("loan-1\noutcome=FOUND");
     }
 
     @Test

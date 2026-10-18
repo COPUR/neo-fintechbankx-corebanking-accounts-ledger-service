@@ -1,0 +1,194 @@
+# Defaults are production-shaped (multi-replica, spread across zones).
+# Override per environment with values-<env>.yaml.
+
+# The pods run the image by digest only: repository@digest, the reference cosign
+# verifies in the cicd-templates helm-deploy job (its render guard refuses any other
+# image line). helm-deploy sets image.repository and image.digest; image.tag is
+# optional and only names the version labels (git SHA; never "latest").
+image:
+  repository: ""   # e.g. <account>.dkr.ecr.<region>.amazonaws.com/fintechbankx/accounts-ledger-service
+  digest: ""       # sha256:<64 hex>
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+
+serviceAccount:
+  name: accounts-ledger-service
+  # IAM role from deploy/terraform output workload_role_arn (IRSA).
+  roleArn: ""
+
+# Platform contract labels. app, version and app.kubernetes.io/name are set by
+# the templates (app = service account name, version = image tag).
+podLabels:
+  app.kubernetes.io/part-of: fintechbankx-corebanking
+  fintechbankx.io/service-id: svc-acc-accounts-ledger
+  fintechbankx.io/app: app-acc-ledger
+  sidecar.istio.io/inject: "true"
+
+service:
+  port: 8080
+  managementPort: 8081
+
+# Memory request equals the limit: the JVM heap does not shrink, so memory is
+# not a scaling signal and a pod must never be scheduled on memory it may not get.
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 1Gi
+
+# Scales on CPU only (see resources).
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 65
+
+podDisruptionBudget:
+  minAvailable: 2
+
+# Non-secret runtime settings, rendered into a ConfigMap. Keys marked required
+# fail the render when empty (templates/configmap.yaml).
+config:
+  # required (deploy/terraform output jdbc_url). Must verify the server
+  # certificate against the mounted RDS CA bundle (databaseCa below), e.g.
+  # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_acc_accounts_ledger_<env>?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem
+  DB_URL: ""
+  # Runtime role (DML only, granted by V3); its password comes from the
+  # db-app secret. The schema owner is used only by the migration Job.
+  DB_USERNAME: accounts_ledger_app
+  DB_POOL_MAX: "10"
+  KAFKA_BOOTSTRAP_SERVERS: ""     # required
+  # No KAFKA_SECURITY_PROTOCOL or SPRING_PROFILES_ACTIVE here: the Deployment
+  # renders both from kafka.flavour (msk: kafka-msk + SASL_SSL, strimzi:
+  # kafka-strimzi + SSL); the guard refuses SPRING_PROFILES_* and requires any
+  # *SECURITY_PROTOCOL set here to equal the flavour's.
+  OIDC_ISSUER_URI: ""             # required
+  OIDC_JWK_SET_URI: ""            # required
+  OIDC_AUDIENCE: svc-acc-accounts-ledger
+  # Comma-separated azp allow-list for POST /api/v1/journal-entries.
+  SERVICE_CALLERS: svc-pay-initiation-settlement,svc-pay-recurring-mandates,svc-pay-bulk-orchestration,svc-ln-loan-lifecycle
+  # client=prefix pairs: the references each listed service may post and look up.
+  SERVICE_REFERENCE_PREFIXES: svc-pay-initiation-settlement=payment-,svc-pay-recurring-mandates=mandate-,svc-pay-bulk-orchestration=bulk-,svc-ln-loan-lifecycle=loan-
+  OUTBOX_RELAY_ENABLED: "false"
+
+# Extra container env entries ({name, value} or {name, valueFrom}) for the
+# service pods. config and extraEnv go through the shared chart's datasource TLS
+# guard fbx.guard (templates/_fbx_helpers.tpl, vendored unchanged from
+# cicd-templates 73e1881) plus this chart's additions (templates/_helpers.tpl,
+# accounts.validateTls): the render fails on any spring.datasource|flyway|
+# liquibase|r2dbc.* name (except SPRING_DATASOURCE_USERNAME and
+# SPRING_DATASOURCE_PASSWORD), spring.config.*, spring.profiles.*, spring.ssl.*,
+# *ssl.bundle*, *sslmode*, *sslrootcert* (DB_SSL_ROOT_CERT included),
+# spring.application.json, fintechbankx.tls.*, spring.kafka.*properties|ssl.*, spring.data.mongodb.*,
+# jdbc_url, sslfactory, sslhostnameverifier and sslpasswordcallback, in any
+# spelling, case, indexed or canonical form; on DB_URL in any spelling outside
+# config.DB_URL; on JVM options (JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS,
+# _JAVA_OPTIONS, JAVA_OPTS) from valueFrom or mentioning datasource, jdbc, ssl,
+# spring.config, spring.profiles, fintechbankx, kafka, security.protocol,
+# jdk.tls, java.security.properties, an options file, '$(' or '${'; on any
+# *SECURITY_PROTOCOL value other than the flavour's (SASL_SSL for msk, SSL for
+# strimzi) and any *endpoint.identification.algorithm other than https; on an
+# extraEnv value containing '$('; on envFrom / extraEnvFrom values; and on any
+# jdbc:postgresql: value that is not sslmode=verify-full once with the mounted
+# RDS CA bundle, parsed as PgJDBC does, with no '${' or '$('.
+extraEnv: []
+
+requiredConfig:
+  - DB_URL
+  - KAFKA_BOOTSTRAP_SERVERS
+  - OIDC_ISSUER_URI
+  - OIDC_JWK_SET_URI
+
+# Kafka flavour: msk (AWS, IAM auth through IRSA) or strimzi (in-cluster TLS
+# listener, client certificate from Secret kafka.strimzi.tlsSecretName, PEM
+# keys user.crt and user.key). The broker is trusted through the Strimzi
+# cluster CA, Secret kafka.strimzi.clusterCaSecretName key ca.crt (event-streaming
+# 5f7d546, deploy/strimzi/README.md), not the client CA in the KafkaUser secret.
+kafka:
+  flavour: msk
+  strimzi:
+    tlsSecretName: kafka-client-tls
+    # Copy of the cluster's <cluster>-cluster-ca-cert in this namespace.
+    clusterCaSecretName: fintechbankx-cluster-ca-cert
+    # Strimzi does its own TLS; the sidecar must not intercept the TLS listener.
+    excludeOutboundPorts: "9093"
+
+# Owning squad, rendered as the common label fintechbankx.io/squad on every
+# object and pod (platform review round 2: corebanking).
+squad: corebanking
+
+# NetworkPolicy belongs to the mesh repo (platform review round 2, cicd-templates
+# 1dd1138), so the chart renders none by default. Opt-in only for a cluster the
+# mesh repo does not cover yet; it admits namespaces only, never a CIDR.
+networkPolicy:
+  enabled: false
+  # 8080: the ingress gateway and these caller namespaces
+  apiNamespaces:
+    - istio-ingress
+    - payments
+    - lending
+  # Scrape: the observability PodMonitor reads Istio's merged metrics on 15020
+  # (app 8081 and Envoy), so 15020 and 8081 from this namespace only.
+  observabilityNamespace: observability
+
+# Metrics: the observability repo's PodMonitor fintechbankx-services is the
+# single scrape path (pod label fintechbankx.io/service-id plus the
+# prometheus.io annotations). This chart ships no ServiceMonitor (cicd-templates
+# 0f86859).
+
+# Flyway as a separate step: a pre-install/pre-upgrade Job runs the image with
+# "migrate" as the schema owner. Its ExternalSecret and Secret exist only while
+# the hook runs; the service pods never see the owner credential.
+migration:
+  enabled: true
+  # REQUIRED Secrets Manager secret
+  # <env>/accounts-ledger-service/db-migration ({"username",
+  # "password"} of the schema owner; deploy/terraform output
+  # migration_db_secret_name).
+  remoteSecretName: ""
+  # A classic (non-native) Istio sidecar keeps the Job from completing, so
+  # the Job runs outside the mesh by default; it only talks to Aurora (TLS
+  # verify-full). Set true once the cluster runs Istio native sidecars.
+  # The Job runs as its own hook ServiceAccount, named like the Job
+  # (templates/migration-job.yaml), never the chart's: before flipping this,
+  # the mesh must admit that hook account's identity for Aurora egress.
+  istioSidecar: false
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 512Mi
+
+# Amazon RDS CA bundle, published in every namespace by the platform as
+# ConfigMap rds-ca-bundle (key global-bundle.pem) and mounted read-only; the
+# JDBC URL must point sslrootcert at it with sslmode=verify-full.
+# Same shape as the shared chart's databaseCa (cicd-templates 4f0f266): mounted
+# read-only at mountPath, exported as DB_SSL_ROOT_CERT, not optional (a missing
+# bundle stops the pod), and a DB_URL without sslmode=verify-full fails the render.
+databaseCa:
+  configMapName: rds-ca-bundle
+  key: global-bundle.pem
+  mountPath: /etc/fintechbankx/rds-ca
+
+# Database credential, synced from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  # Keys must be <env>/accounts-ledger-service/<name>: the
+  # platform ESO role may read only secret:<env>/* and the admission policy
+  # only <env>/<service account>/ (the chart refuses anything else).
+  # Secrets Manager secret <env>/accounts-ledger-service/db-app
+  # (deploy/terraform output app_db_secret_name).
+  remoteSecretName: ""
+  refreshInterval: 1h
+
+topologySpread:
+  maxSkew: 1

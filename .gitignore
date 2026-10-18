@@ -1,0 +1,17 @@
+.gradle/
+build/
+**/build/
+*.iml
+.idea/
+/out/
+# Hexagonal port packages are named "out"; never ignore source directories.
+!**/src/**/out/
+
+# Terraform working files
+**/.terraform/
+# .terraform.lock.hcl is committed: it pins the provider builds CI and applies use.
+*.tfstate
+*.tfstate.*
+
+# AsyncAPI gate dependencies (npm ci --prefix scripts/ci)
+scripts/ci/node_modules/

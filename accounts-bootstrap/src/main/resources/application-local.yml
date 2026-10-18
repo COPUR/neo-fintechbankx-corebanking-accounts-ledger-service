@@ -1,0 +1,6 @@
+# Local runs only (SPRING_PROFILES_ACTIVE=local; REGRESSION_MAPPING section 4): a
+# developer's PostgreSQL without TLS and a PLAINTEXT Kafka listener. Never set in a
+# deployment; the Helm chart refuses FINTECHBANKX_TLS_ENFORCE in config and extraEnv.
+fintechbankx:
+  tls:
+    enforce: false

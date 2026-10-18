@@ -1,0 +1,11 @@
+apiVersion: v2
+name: accounts-ledger-service
+description: svc-acc-accounts-ledger, the core-banking accounts ledger service (bounded context accounts_ledger) of FinTechBankX.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+annotations:
+  fintechbankx.io/service-id: svc-acc-accounts-ledger
+  fintechbankx.io/owning-squad: Payment Orchestration Squad
+  fintechbankx.io/owning-tribe: Lending and Money Movement Tribe
+  fintechbankx.io/bounded-context: accounts_ledger
